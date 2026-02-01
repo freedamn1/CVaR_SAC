@@ -1,2 +1,2 @@
 # CVaR_SAC
-A research to the dynamic price of preemptible instances based on WCSAC algorithm
+A novel dynamic pricing approach for preemptible instances based on WCSAC algorithm
