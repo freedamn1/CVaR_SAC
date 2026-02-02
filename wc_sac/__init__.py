@@ -1,10 +1,3 @@
-<<<<<<< HEAD
-from tensorflow.python.util import deprecation as deprecation
-deprecation._PRINT_DEPRECATION_WARNINGS = False
-
-from wc_sac.sac.saclag import sac
-from wc_sac.sac.wcsac import sac
-=======
 """
 wc_sac 包入口。
 
@@ -29,4 +22,3 @@ try:
     from wc_sac.sac.wcsac import sac as wcsac  # noqa: F401
 except Exception:
     pass
->>>>>>> 90bd2a2252c4e34920844c44c02da949381d401c

@@ -28,7 +28,14 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Optional
 
-import gym
+try:
+    import gym
+except Exception as e:
+    raise ImportError(
+        "无法导入依赖 'gym'。请确保使用相同的 Python 解释器安装 gym==0.15.3，\n"
+        "示例：C:/Users/86183/anaconda3/python.exe -m pip install 'gym==0.15.3'"
+    ) from e
+
 import numpy as np
 
 
@@ -53,11 +60,15 @@ class ExcessiveCapacitySeries:
 
     @classmethod
     def from_npz(cls, path: str | Path) -> "ExcessiveCapacitySeries":
-        data = np.load(str(path))
-        # 兼容旧字段名 surplus_cpu
-        excessive_capacity = data.get("excessive_capacity_cpu") or data.get("surplus_cpu")
-        if excessive_capacity is None:
-            raise KeyError("npz 中缺少 excessive_capacity_cpu 或 surplus_cpu")
+        path = Path(path)
+        if not path.exists():
+            raise FileNotFoundError(f"NPZ file not found: {path}")
+        data = np.load(str(path), allow_pickle=True)
+        # 明确检查键，避免对 numpy 数组做布尔判断
+        if "excessive_capacity_cpu" in data:
+            excessive_capacity = data["excessive_capacity_cpu"]
+        else:
+            raise KeyError("NPZ file must contain 'excessive_capacity_cpu' key.")
         return cls(excessive_capacity)
 
     def __len__(self) -> int:
