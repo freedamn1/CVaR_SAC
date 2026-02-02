@@ -1,0 +1,147 @@
+from __future__ import annotations
+
+"""
+抢占式云服务动态定价环境（Gym API），用于对接 wc_sac/sac/wcsac.py。
+
+状态：
+  s_t = [C_t, N_t]
+  - C_t：excessive capacity（NCU），由 traces 驱动
+  - N_t：当前运行的抢占式实例数量（你定义的抽象“实例数”）
+
+动作：
+  a_t：归一化动作 in [-1, 1]，环境内部映射到价格 p_t ∈ [p_min, p_max]
+
+动态：
+  A_t ~ Poisson(f(p_t) * dt)
+  L_t ~ Poisson(g(p_t) * dt)
+  P_t = max(A_t - L_t - C_t, 0)
+  N_{t+1} = max(N_t + A_t - L_t - P_t, 0)
+
+回报：
+  r_t = p_t * N_t * dt
+
+成本（约束信号，WC-SAC 读取 info['cost']）：
+  cost_t = P_t / max(N_t, eps)
+"""
+
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Callable, Optional
+
+import gym
+import numpy as np
+
+
+@dataclass
+class PricingEnvConfig:
+    p_min: float
+    p_max: float
+    dt: float  # seconds
+    horizon: int  # steps per episode
+    n0: float = 0.0
+    eps: float = 1e-8
+    seed: Optional[int] = None
+
+
+class ExcessiveCapacitySeries:
+    """仅封装 excessive_capacity_cpu 序列供环境按 t 读取。"""
+
+    def __init__(self, excessive_capacity_cpu: np.ndarray):
+        self.excessive_capacity_cpu = np.asarray(excessive_capacity_cpu, dtype=np.float32)
+        if self.excessive_capacity_cpu.ndim != 1 or len(self.excessive_capacity_cpu) < 2:
+            raise ValueError("excessive_capacity_cpu 必须是一维数组，且长度至少为 2。")
+
+    @classmethod
+    def from_npz(cls, path: str | Path) -> "ExcessiveCapacitySeries":
+        data = np.load(str(path))
+        # 兼容旧字段名 surplus_cpu
+        excessive_capacity = data.get("excessive_capacity_cpu") or data.get("surplus_cpu")
+        if excessive_capacity is None:
+            raise KeyError("npz 中缺少 excessive_capacity_cpu 或 surplus_cpu")
+        return cls(excessive_capacity)
+
+    def __len__(self) -> int:
+        return int(len(self.excessive_capacity_cpu))
+
+    def at(self, t: int) -> float:
+        t = int(np.clip(t, 0, len(self.excessive_capacity_cpu) - 1))
+        return float(self.excessive_capacity_cpu[t])
+
+
+class PreemptivePricingEnv(gym.Env):
+    metadata = {"render.modes": []}
+
+    def __init__(
+        self,
+        capacity_series: ExcessiveCapacitySeries,
+        cfg: PricingEnvConfig,
+        f_arrival_rate: Callable[[float], float],
+        g_leave_rate: Callable[[float], float],
+    ):
+        super().__init__()
+        self.series = capacity_series
+        self.cfg = cfg
+        self.f = f_arrival_rate
+        self.g = g_leave_rate
+
+        # 归一化动作，避免 wcsac.py 的对称缩放假设踩坑
+        self.action_space = gym.spaces.Box(low=-1.0, high=1.0, shape=(1,), dtype=np.float32)
+        # 观测：C_t, N_t
+        self.observation_space = gym.spaces.Box(low=-np.inf, high=np.inf, shape=(2,), dtype=np.float32)
+
+        self._rng = np.random.RandomState(cfg.seed)
+        self._t = 0
+        self._n = float(cfg.n0)
+
+    def seed(self, seed: Optional[int] = None):
+        if seed is None:
+            return
+        self._rng = np.random.RandomState(int(seed))
+
+    def _action_to_price(self, a_norm: float) -> float:
+        a = float(np.clip(a_norm, -1.0, 1.0))
+        return float(self.cfg.p_min + (a + 1.0) * 0.5 * (self.cfg.p_max - self.cfg.p_min))
+
+    def reset(self):
+        self._t = 0
+        self._n = float(self.cfg.n0)
+        c0 = self.series.at(self._t)
+        return np.array([c0, self._n], dtype=np.float32)
+
+    def step(self, action):
+        a_norm = float(np.asarray(action, dtype=np.float32).reshape(-1)[0])
+        price = self._action_to_price(a_norm)
+
+        c_t = self.series.at(self._t)
+        n_t = self._n
+
+        lam_a = max(float(self.f(price)) * float(self.cfg.dt), 0.0)
+        lam_l = max(float(self.g(price)) * float(self.cfg.dt), 0.0)
+        arrivals = float(self._rng.poisson(lam_a))
+        leaves = float(self._rng.poisson(lam_l))
+
+        preempted = max(arrivals - leaves - c_t, 0.0)
+        n_next = max(n_t + arrivals - leaves - preempted, 0.0)
+
+        reward = price * n_t * float(self.cfg.dt)
+        cost = preempted / max(n_t, float(self.cfg.eps))
+
+        # advance time
+        self._t += 1
+        self._n = n_next
+
+        done = bool(self._t >= self.cfg.horizon or self._t >= (len(self.series) - 1))
+        c_next = self.series.at(self._t)
+        obs = np.array([c_next, self._n], dtype=np.float32)
+
+        info = {
+            "cost": float(cost),
+            "price": float(price),
+            "arrivals": float(arrivals),
+            "leaves": float(leaves),
+            "preempted": float(preempted),
+            "excessive_capacity": float(c_t),
+            "n_running": float(n_t),
+        }
+        return obs, float(reward), done, info
+
