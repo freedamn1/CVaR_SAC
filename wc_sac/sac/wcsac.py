@@ -9,7 +9,16 @@ import time
 from wc_sac.utils.logx import EpochLogger
 from wc_sac.utils.mpi_tf import sync_all_params, MpiAdamOptimizer
 from wc_sac.utils.mpi_tools import mpi_fork, mpi_sum, proc_id, mpi_statistics_scalar, num_procs
+<<<<<<< HEAD
 from safety_gym.envs.engine import Engine
+=======
+try:
+    # 仅在使用 Safety Gym 环境时需要；动态定价环境不依赖。
+    from safety_gym.envs.engine import Engine  # type: ignore
+except Exception:
+    Engine = None  # type: ignore
+
+>>>>>>> 90bd2a2252c4e34920844c44c02da949381d401c
 from gym.envs.registration import register
 from scipy.stats import norm
 
