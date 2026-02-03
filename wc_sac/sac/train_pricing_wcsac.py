@@ -43,12 +43,6 @@ def make_poisson_rates(eta: float, thet: float, k: float, omega: float):
 
     return f, g
 
-def normalize_to_0_100(x: np.ndarray) -> np.ndarray:
-    """把一维序列做 min-max 归一化到 [0, 100]。"""
-    x = np.asarray(x, dtype=np.float32).reshape(-1)
-    x_min = float(np.nanmin(x))
-    x_max = float(np.nanmax(x))
-    return ((x - x_min) / (x_max - x_min) * 100.0).astype(np.float32)
 
 def main():
     parser = argparse.ArgumentParser()
@@ -91,8 +85,6 @@ def main():
     args = parser.parse_args()
 
     series = ExcessiveCapacitySeries.from_npz(args.excessive_capacity_npz)
-    series.excessive_capacity_cpu = normalize_to_0_100(series.excessive_capacity_cpu)
-    
     cfg = PricingEnvConfig(
         p_min=args.p_min,
         p_max=args.p_max,
@@ -104,7 +96,7 @@ def main():
     f, g = make_poisson_rates(args.eta, args.thet, args.k, args.omega)
 
     def env_fn():
-        return PreemptivePricingEnv(series, cfg, f_arrival_rate=f, g_leave_rate=g)
+        return PreemptivePricingEnv(series, cfg, f_arrival_rate=f, g_departure_rate=g)
 
     sac(
         env_fn,

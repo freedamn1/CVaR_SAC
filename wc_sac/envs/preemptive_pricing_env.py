@@ -6,7 +6,7 @@ from __future__ import annotations
 状态：
   s_t = [C_t, N_t]
   - C_t：excessive capacity（NCU），由 traces 驱动
-  - N_t：当前运行的抢占式实例数量（你定义的抽象“实例数”）
+  - N_t：当前运行的抢占式实例数量（定义的抽象“实例数”）
 
 动作：
   a_t：归一化动作 in [-1, 1]，环境内部映射到价格 p_t ∈ [p_min, p_max]
@@ -38,6 +38,12 @@ except Exception as e:
 
 import numpy as np
 
+def normalize_to_0_100(x: np.ndarray) -> np.ndarray:
+    """把一维序列做 min-max 归一化到 [0, 100]。"""
+    x = np.asarray(x, dtype=np.float32).reshape(-1)
+    x_min = float(np.nanmin(x))
+    x_max = float(np.nanmax(x))
+    return ((x - x_min) / (x_max - x_min) * 100.0).astype(np.float32)
 
 @dataclass
 class PricingEnvConfig:
@@ -87,16 +93,17 @@ class PreemptivePricingEnv(gym.Env):
         capacity_series: ExcessiveCapacitySeries,
         cfg: PricingEnvConfig,
         f_arrival_rate: Callable[[float], float],
-        g_leave_rate: Callable[[float], float],
+        g_departure_rate: Callable[[float], float],
     ):
         super().__init__()
         self.series = capacity_series
         self.cfg = cfg
         self.f = f_arrival_rate
-        self.g = g_leave_rate
+        self.g = g_departure_rate
 
         # 归一化动作，避免 wcsac.py 的对称缩放假设踩坑
         self.action_space = gym.spaces.Box(low=-1.0, high=1.0, shape=(1,), dtype=np.float32)
+        self.series.excessive_capacity_cpu = normalize_to_0_100(self.series.excessive_capacity_cpu)
         # 观测：C_t, N_t
         self.observation_space = gym.spaces.Box(low=-np.inf, high=np.inf, shape=(2,), dtype=np.float32)
 
@@ -128,8 +135,10 @@ class PreemptivePricingEnv(gym.Env):
 
         lam_a = max(float(self.f(price)) * float(self.cfg.dt), 0.0)
         lam_l = max(float(self.g(price)) * float(self.cfg.dt), 0.0)
-        arrivals = float(self._rng.poisson(lam_a))
-        leaves = float(self._rng.poisson(lam_l))
+        # arrivals = float(self._rng.poisson(lam_a))
+        # leaves = float(self._rng.poisson(lam_l))
+        arrivals = lam_a
+        leaves = lam_l
 
         preempted = max(arrivals - leaves - c_t, 0.0)
         n_next = max(n_t + arrivals - leaves - preempted, 0.0)
