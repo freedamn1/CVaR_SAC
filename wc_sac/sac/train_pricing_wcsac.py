@@ -23,16 +23,32 @@ from wc_sac.envs.preemptive_pricing_env import (
 from wc_sac.sac.wcsac import sac
 
 
-def make_linear_rates(k_f: float, b_f: float, k_g: float, b_g: float):
-    # 你可以把这里替换成拟合后的 f(p), g(p) 形式
+def make_poisson_rates(eta: float, thet: float, k: float, omega: float):
+    # 泊松率函数：
+    # f(p) = eta * (1 - p**k) ** omega
+    # g(p) = thet - thet * (1 - p**k) ** omega
     def f(p: float) -> float:
-        return max(k_f * p + b_f, 0.0)
+        try:
+            val = eta * (1.0 - float(p) ** k) ** omega
+        except Exception:
+            val = 0.0
+        return max(float(val), 0.0)
 
     def g(p: float) -> float:
-        return max(k_g * p + b_g, 0.0)
+        try:
+            val = thet - thet * (1.0 - float(p) ** k) ** omega
+        except Exception:
+            val = 0.0
+        return max(float(val), 0.0)
 
     return f, g
 
+def normalize_to_0_100(x: np.ndarray) -> np.ndarray:
+    """把一维序列做 min-max 归一化到 [0, 100]。"""
+    x = np.asarray(x, dtype=np.float32).reshape(-1)
+    x_min = float(np.nanmin(x))
+    x_max = float(np.nanmax(x))
+    return ((x - x_min) / (x_max - x_min) * 100.0).astype(np.float32)
 
 def main():
     parser = argparse.ArgumentParser()
@@ -44,11 +60,11 @@ def main():
     parser.add_argument("--n0", type=float, default=0.0)
     parser.add_argument("--seed", type=int, default=0)
 
-    # 泊松率函数参数（先给线性占位；你可按论文/拟合改成指数或分段）
-    parser.add_argument("--k_f", type=float, default=-1.0)
-    parser.add_argument("--b_f", type=float, default=10.0)
-    parser.add_argument("--k_g", type=float, default=0.5)
-    parser.add_argument("--b_g", type=float, default=0.0)
+    # 泊松率函数参数：f(p)=eta*(1-p**k)**omega, g(p)=thet-thet*(1-p**k)**omega
+    parser.add_argument("--eta", type=float, default=10.0, help="arrival scale eta")
+    parser.add_argument("--thet", type=float, default=5.0, help="leave scale thet")
+    parser.add_argument("--k", type=float, default=1.0, help="exponent k on p")
+    parser.add_argument("--omega", type=float, default=1.0, help="power omega on (1-p**k)")
 
     # 训练超参：保持与原 wcsac.py 一致的命名
     parser.add_argument("--hid", type=int, default=256)
@@ -75,6 +91,8 @@ def main():
     args = parser.parse_args()
 
     series = ExcessiveCapacitySeries.from_npz(args.excessive_capacity_npz)
+    series.excessive_capacity_cpu = normalize_to_0_100(series.excessive_capacity_cpu)
+    
     cfg = PricingEnvConfig(
         p_min=args.p_min,
         p_max=args.p_max,
@@ -83,7 +101,7 @@ def main():
         n0=args.n0,
         seed=args.seed,
     )
-    f, g = make_linear_rates(args.k_f, args.b_f, args.k_g, args.b_g)
+    f, g = make_poisson_rates(args.eta, args.thet, args.k, args.omega)
 
     def env_fn():
         return PreemptivePricingEnv(series, cfg, f_arrival_rate=f, g_leave_rate=g)
