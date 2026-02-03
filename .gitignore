@@ -1,0 +1,11 @@
+# Ignore datasets / large artifacts
+dataset/
+wc_sac/dataset/
+
+# Common local artifacts
+**/__pycache__/
+*.pyc
+.vscode/
+
+# Generated data files
+*.npz
