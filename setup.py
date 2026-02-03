@@ -1,23 +1,29 @@
 #!/usr/bin/env python
 
-from setuptools import setup
+from setuptools import setup, find_packages
 import sys
 
-assert sys.version_info.major == 3 and sys.version_info.minor >= 6, \
-    "WCSAC is designed to work with Python 3.6 and greater. " \
+assert sys.version_info.major == 3 and sys.version_info.minor >= 6, (
+    "WCSAC is designed to work with Python 3.6 and greater. "
     + "Please install it before proceeding."
+)
 
 setup(
-    name='wc_sac',
-    packages=['wc_sac'],
+    name="wc_sac",
+    version="0.0.0",
+    packages=find_packages(include=["wc_sac", "wc_sac.*"]),
+    python_requires=">=3.6",
+    # 说明：
+    # - 为了让 `pip install -e .` 在常见环境中顺利完成，这里只保留最小依赖（数据预处理/大多数工具仅需 numpy）。
+    # - 强依赖（tensorflow1 / mujoco_py / mpi4py 等）会在很多 Windows/新 Python 环境里无法安装，
+    #   因此挪到 extras 里，按需安装。
     install_requires=[
-        'gym~=0.15.3',
-        'joblib==0.14.0',
-        'matplotlib==3.1.1',
-        'mpi4py==3.0.2',
-        'mujoco_py==2.0.2.10',
-        'numpy~=1.17.4',
-        'seaborn==0.8.1',
-        'tensorflow==1.13.1',
+        "numpy",
     ],
+    extras_require={
+        # 环境依赖（仅当你需要运行 Gym 环境时安装）
+        "env": ["gym==0.15.3"],
+        # 训练相关（如果你确实需要旧版依赖，可自行补充到这里）
+        # "train": [...],
+    },
 )

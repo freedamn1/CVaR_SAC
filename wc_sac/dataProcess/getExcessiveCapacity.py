@@ -21,7 +21,7 @@ from __future__ import annotations
 import csv
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, Optional, Tuple
+from typing import Dict, Optional, Tuple, Literal
 
 import numpy as np
 
@@ -34,9 +34,9 @@ class ExcessiveCapacitySeries:
     capacity_cpu: float
     # 每步窗口起始时间（秒）
     times: np.ndarray  # shape (T,), int64
-    # 每步总 CPU 使用量（归一化，0-1）
+    # 每步总 CPU 使用量（CPU 核心数加总；单位=core）
     usage_cpu: np.ndarray  # shape (T,), float32
-    # 每步 excessive capacity（归一化，0-1）
+    # 每步 excessive capacity（CPU 核心数；单位=core）
     excessive_capacity_cpu: np.ndarray  # shape (T,), float32
 
     def save_npz(self, path: Path) -> None:
@@ -109,27 +109,34 @@ def _align_by_dt(times_arr: np.ndarray, usage_arr: np.ndarray, dt_seconds: int) 
     return times_aligned, usage_aligned
 
 
-def _load_usage_series(data_dir: Path, dt_seconds: int, machine_capacities: Dict[str, float]) -> Tuple[np.ndarray, np.ndarray]:
+def _load_usage_series_10sec(
+    data_dir: Path,
+    machine_capacities: Dict[str, float],
+    raw_step_seconds: int = 10,
+) -> Tuple[np.ndarray, np.ndarray]:
     """
-    从 machine_usage.csv 加载按时间步对齐的 CPU 使用量序列。
+    从 machine_usage.csv 加载“10 秒时间步”的总 CPU 使用量序列（所有机器加总）。
 
     参数：
     - data_dir: 数据目录
-    - dt_seconds: 时间步长度（秒）
     - machine_capacities: machine_id -> cpu_num 映射
+    - raw_step_seconds: 原始时间步长度（秒），默认 10（你当前数据 TIME_STAMP 差分主要为 10）
 
     返回：(times, usage_cpu)
-    - times: 时间戳数组（秒）
-    - usage_cpu: 每步总 CPU 使用量（CPU核心数）
+    - times: 时间戳数组（秒，等间隔 raw_step_seconds）
+    - usage_cpu: 每步总 CPU 使用量（CPU核心数，跨机器求和）
     """
     csv_path = data_dir / "machine_usage.csv"
     if not csv_path.exists():
         raise FileNotFoundError(f"未找到 {csv_path}")
 
     # 无表头：machine_id, TIME_STAMP, cpu_util_percent, ...
-    sums: Dict[int, float] = {}
-    min_bucket: Optional[int] = None
-    max_bucket: Optional[int] = None
+    sums_by_t: Dict[int, float] = {}
+    min_t: Optional[int] = None
+    max_t: Optional[int] = None
+    step = int(raw_step_seconds)
+    if step <= 0:
+        raise ValueError("raw_step_seconds 必须为正整数。")
 
     with csv_path.open("rt", encoding="utf-8", newline="") as f:
         reader = csv.reader(f)
@@ -157,28 +164,75 @@ def _load_usage_series(data_dir: Path, dt_seconds: int, machine_capacities: Dict
             if t == 0:
                 continue
 
-            bucket = t // int(dt_seconds)
             u = (cpu_util / 100.0) * float(cap)
-            sums[bucket] = sums.get(bucket, 0.0) + u
+            sums_by_t[t] = sums_by_t.get(t, 0.0) + u
 
-            if min_bucket is None or bucket < min_bucket:
-                min_bucket = bucket
-            if max_bucket is None or bucket > max_bucket:
-                max_bucket = bucket
+            if min_t is None or t < min_t:
+                min_t = t
+            if max_t is None or t > max_t:
+                max_t = t
 
-    if min_bucket is None or max_bucket is None:
+    if min_t is None or max_t is None:
         raise RuntimeError("machine_usage.csv 解析后没有得到任何有效的使用数据")
 
-    T = (max_bucket - min_bucket) + 1
-    times = ((min_bucket + np.arange(T, dtype=np.int64)) * int(dt_seconds)).astype(np.int64)
-    usage = np.zeros((T,), dtype=np.float32)
-    for b, u in sums.items():
-        usage[int(b - min_bucket)] = float(u)
+    # 用连续等间隔的 10 秒时间轴对齐（缺失步补 0），便于后续按 300 秒窗口聚合
+    start = int(min_t)
+    end = int(max_t)
+    if (start % step) != 0:
+        # 不强行对齐到 0，只对齐到 step 的倍数，避免引入额外前缀空窗
+        start = (start // step) * step
+    if (end % step) != 0:
+        end = (end // step) * step
+    times = np.arange(start, end + step, step, dtype=np.int64)
+    usage = np.zeros((len(times),), dtype=np.float32)
+    for i, t_val in enumerate(times):
+        u = sums_by_t.get(int(t_val), 0.0)
+        usage[i] = float(u)
 
     return times, usage
 
 
-def build_excessive_capacity_cpu_series(data_dir: Path, dt_seconds: int = 300, capacity_cpu: Optional[float] = None) -> ExcessiveCapacitySeries:
+def _downsample_usage_mean(
+    times: np.ndarray,
+    usage: np.ndarray,
+    raw_step_seconds: int,
+    target_dt_seconds: int,
+) -> Tuple[np.ndarray, np.ndarray]:
+    """
+    将 10 秒使用序列按 target_dt_seconds 做窗口均值下采样。
+
+    - times 必须等间隔 raw_step_seconds
+    - 仅保留完整窗口（末尾不足一个窗口的部分丢弃）
+    """
+    raw_step = int(raw_step_seconds)
+    target_dt = int(target_dt_seconds)
+    if raw_step <= 0 or target_dt <= 0:
+        raise ValueError("raw_step_seconds/target_dt_seconds 必须为正整数。")
+    if target_dt % raw_step != 0:
+        raise ValueError(f"target_dt_seconds({target_dt}) 必须是 raw_step_seconds({raw_step}) 的整数倍。")
+
+    ratio = target_dt // raw_step
+    n = int(len(usage))
+    n_win = n // ratio
+    if n_win < 1:
+        raise RuntimeError("数据长度不足以构建任何一个完整的下采样窗口。")
+
+    cut = n_win * ratio
+    usage_cut = usage[:cut].astype(np.float32, copy=False)
+    times_cut = times[:cut].astype(np.int64, copy=False)
+
+    usage_ds = usage_cut.reshape(n_win, ratio).mean(axis=1).astype(np.float32, copy=False)
+    times_ds = times_cut[::ratio].astype(np.int64, copy=False)
+    return times_ds, usage_ds
+
+
+def build_excessive_capacity_cpu_series(
+    data_dir: Path,
+    dt_seconds: int = 300,
+    capacity_cpu: Optional[float] = None,
+    raw_step_seconds: int = 10,
+    downsample: Optional[Literal["mean"]] = "mean",
+) -> ExcessiveCapacitySeries:
     """
     构建 (times, total_usage_cpu, excessive_capacity_cpu)。
 
@@ -186,6 +240,8 @@ def build_excessive_capacity_cpu_series(data_dir: Path, dt_seconds: int = 300, c
     - data_dir: 含 machine_meta.csv 与 machine_usage.csv 的目录（可递归）
     - dt_seconds: 时间步长度（秒），默认 300
     - capacity_cpu: 可选手动指定集群 CPU 总容量（CPU核心数总和）。不指定则从 machine_meta.csv 计算所有可用机器的 cpu_num 总和。
+    - raw_step_seconds: machine_usage.csv 的原始时间步（秒），你当前数据为 10
+    - downsample: 当 dt_seconds > raw_step_seconds 时的聚合方式；目前仅支持 "mean"
     """
     data_dir = Path(data_dir).expanduser().resolve()
     if not data_dir.exists():
@@ -200,10 +256,27 @@ def build_excessive_capacity_cpu_series(data_dir: Path, dt_seconds: int = 300, c
     else:
         capacity_cpu = float(capacity_cpu)
 
-    # 2) 加载使用量序列
-    times, usage = _load_usage_series(data_dir, dt_seconds=dt_seconds, machine_capacities=machine_capacities)
+    # 2) 先加载 10 秒级别使用序列
+    times_10, usage_10 = _load_usage_series_10sec(
+        data_dir,
+        machine_capacities=machine_capacities,
+        raw_step_seconds=int(raw_step_seconds),
+    )
 
-    # 3) 计算 excessive capacity
+    # 3) 需要的话再按 dt_seconds 下采样
+    if int(dt_seconds) == int(raw_step_seconds):
+        times, usage = times_10, usage_10
+    else:
+        if downsample != "mean":
+            raise ValueError("目前仅支持 downsample='mean'。")
+        times, usage = _downsample_usage_mean(
+            times_10,
+            usage_10,
+            raw_step_seconds=int(raw_step_seconds),
+            target_dt_seconds=int(dt_seconds),
+        )
+
+    # 4) 计算 excessive capacity
     excessive_capacity = np.maximum(capacity_cpu - usage.astype(np.float32), 0.0).astype(np.float32)
 
     return ExcessiveCapacitySeries(
@@ -213,3 +286,31 @@ def build_excessive_capacity_cpu_series(data_dir: Path, dt_seconds: int = 300, c
         usage_cpu=usage.astype(np.float32),
         excessive_capacity_cpu=excessive_capacity,
     )
+
+
+def build_excessive_capacity_cpu_series_two_stage(
+    data_dir: Path,
+    capacity_cpu: Optional[float] = None,
+    raw_step_seconds: int = 10,
+    env_dt_seconds: int = 300,
+) -> Tuple[ExcessiveCapacitySeries, ExcessiveCapacitySeries]:
+    """
+    两阶段构建：
+    1) 先按 raw_step_seconds（默认 10 秒）汇总 usage_cpu，并保存/返回 10 秒级别序列
+    2) 再按 env_dt_seconds（默认 300 秒）做窗口均值，返回环境用序列
+    """
+    series_10 = build_excessive_capacity_cpu_series(
+        data_dir=data_dir,
+        dt_seconds=int(raw_step_seconds),
+        capacity_cpu=capacity_cpu,
+        raw_step_seconds=int(raw_step_seconds),
+        downsample="mean",
+    )
+    series_env = build_excessive_capacity_cpu_series(
+        data_dir=data_dir,
+        dt_seconds=int(env_dt_seconds),
+        capacity_cpu=series_10.capacity_cpu,
+        raw_step_seconds=int(raw_step_seconds),
+        downsample="mean",
+    )
+    return series_10, series_env

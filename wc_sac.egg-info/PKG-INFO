@@ -1,10 +1,12 @@
-Metadata-Version: 1.0
-Name: wc-sac
+Metadata-Version: 2.4
+Name: wc_sac
 Version: 0.0.0
-Summary: UNKNOWN
-Home-page: UNKNOWN
-Author: UNKNOWN
-Author-email: UNKNOWN
-License: UNKNOWN
-Description: UNKNOWN
-Platform: UNKNOWN
+Requires-Python: >=3.6
+License-File: LICENSE
+Requires-Dist: numpy
+Provides-Extra: env
+Requires-Dist: gym==0.15.3; extra == "env"
+Dynamic: license-file
+Dynamic: provides-extra
+Dynamic: requires-dist
+Dynamic: requires-python

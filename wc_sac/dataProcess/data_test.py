@@ -5,25 +5,33 @@ from wc_sac.envs.preemptive_pricing_env import (
     PreemptivePricingEnv,
     PricingEnvConfig,
 )
+
+
+def normalize_to_0_100(x: np.ndarray) -> np.ndarray:
+    """把一维序列做 min-max 归一化到 [0, 100]。"""
+    x = np.asarray(x, dtype=np.float32).reshape(-1)
+    x_min = float(np.nanmin(x))
+    x_max = float(np.nanmax(x))
+    return ((x - x_min) / (x_max - x_min) * 100.0).astype(np.float32)
 # npz keys: ['dt_seconds', 'capacity_cpu', 'times', 'usage_cpu', 'excessive_capacity_cpu']
 # total capacityy = 387168.0
-# 1) 加载 npz（文件需包含 'excessive_capacity_cpu' 或 'surplus_cpu'）
-path = Path(r"D:\project\Python_project\wcsac\WCSAC\wc_sac\dataProcess\excessive_capacity_cpu.npz")
+# 1) 加载 npz
+path = Path(r"D:\project\python_project\wxsac\CVaR_SAC\wc_sac\dataProcess\excessive_capacity_cpu_10sec.npz")
 
 # 详细检查 npz 内容
 data = np.load(str(path), allow_pickle=True)
-import numpy as _np
-# 更高精度打印
-_np.set_printoptions(precision=12, suppress=False, linewidth=200)
 
-print("npz keys:", data.files)
-usage = np.asarray(data["usage_cpu"], dtype=np.float32) / 100
-excessive = np.asarray(data["capacity_cpu"]) - usage
-print(excessive.min(), excessive.max(), excessive.mean())
+excessive_capacity_cpu = np.asarray(data["excessive_capacity_cpu"], dtype=np.float32)
+excessive_capacity_cpu_norm = normalize_to_0_100(excessive_capacity_cpu)
 
-series = ExcessiveCapacitySeries(excessive)
+series = ExcessiveCapacitySeries(excessive_capacity_cpu_norm)
 
-print("excessive_capacity_cpu:", series.excessive_capacity_cpu)
+print(
+    "excessive_capacity_cpu normalized[0,100]:",
+    f"min={float(series.excessive_capacity_cpu.min()):.6f}, "
+    f"max={float(series.excessive_capacity_cpu.max()):.6f}, "
+    f"mean={float(series.excessive_capacity_cpu.mean()):.6f}",
+)
 # # 2) 配置环境参数（示例）
 # cfg = PricingEnvConfig(
 #     p_min=0.1,
