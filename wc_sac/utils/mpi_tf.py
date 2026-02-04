@@ -1,5 +1,9 @@
 import numpy as np
 import tensorflow as tf
+if tf.__version__.startswith('2'):
+    import tensorflow.compat.v1 as tf_v1
+    tf_v1.disable_eager_execution()
+    tf = tf_v1
 from mpi4py import MPI
 from wc_sac.utils.mpi_tools import broadcast
 

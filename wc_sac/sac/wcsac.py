@@ -4,17 +4,15 @@
 from functools import partial
 import numpy as np
 import tensorflow as tf
-import gym
+if tf.__version__.startswith('2'):
+    import tensorflow.compat.v1 as tf_v1
+    tf_v1.disable_eager_execution()
+    tf = tf_v1
 import time
 from wc_sac.utils.logx import EpochLogger
 from wc_sac.utils.mpi_tf import sync_all_params, MpiAdamOptimizer
 from wc_sac.utils.mpi_tools import mpi_fork, mpi_sum, proc_id, mpi_statistics_scalar, num_procs
-from safety_gym.envs.engine import Engine
-try:
-    # 仅在使用 Safety Gym 环境时需要；动态定价环境不依赖。
-    from safety_gym.envs.engine import Engine  # type: ignore
-except Exception:
-    Engine = None  # type: ignore
+
 
 from gym.envs.registration import register
 from scipy.stats import norm
@@ -90,23 +88,41 @@ def gaussian_likelihood(x, mu, log_std):
 
 def cvar_from_mean_var(cost_mean, cost_var, cl):
     """
-    由长期成本均值与方差计算 CVaR 的占位函数。
+    由抢占率（cost）的均值、方差闭式计算高斯分布下的CVaR
+    核心公式：CVaR_α(ρ) = μ_ρ + (σ_ρ · φ(Φ⁻¹(1-α))) / α
+    其中：ρ~N(μ_ρ, σ_ρ²)，φ为标准正态PDF，Φ⁻¹为标准正态分位数逆函数
 
-    你当前的算法会用到：
-    - cost_mean: E[G_c | s] 或 E[G_c | s,a]（形状 (batch,)）
-    - cost_var : Var(G_c | s) 或 Var(G_c | s,a)（形状 (batch,)）
-    - cl: CVaR 置信水平（例如 0.5 / 0.9）
-
-    TODO(你来实现闭式公式): 返回每个样本的 CVaR（形状 (batch,)）。
-
-    目前为了保证训练图可构建，这里先返回 mean 作为占位（相当于风险中性）。
+    参数：
+        cost_mean: 抢占率均值 E[ρ]，形状 (batch,)
+        cost_var : 抢占率方差 Var(ρ)，形状 (batch,)
+        cl: CVaR置信水平α（如0.1/0.5/0.9，代表关注最坏α比例场景）
+    返回：
+        cvar: 每个样本的CVaR值，形状 (batch,)，与输入维度完全一致
     """
+    # 转换为TensorFlow张量并指定浮点类型，保证计算图兼容性
     cost_mean = tf.convert_to_tensor(cost_mean, dtype=tf.float32)
     cost_var = tf.convert_to_tensor(cost_var, dtype=tf.float32)
-    _ = cl  # 预留给闭式 CVaR 公式
-    cost_var = tf.maximum(cost_var, 0.0)
-    # placeholder: risk-neutral
-    return tf.identity(cost_mean)
+    cl = tf.convert_to_tensor(cl, dtype=tf.float32)  # 置信水平转为张量，支持批量/标量
+
+    # 数值稳定性处理：方差非负（避免数值误差导致负方差），标准差开方
+    cost_var = tf.maximum(cost_var, 1e-8)  # 加极小值避免开方为0/负数
+    cost_std = tf.sqrt(cost_var)  # 抢占率标准差 σ_ρ
+
+    # 步骤1：计算标准正态分布的(1-α)分位数逆函数 Φ⁻¹(1-α)
+    # tf.math.erfinv是逆误差函数，与标准正态分位数的转换关系：Φ⁻¹(x) = √2 · erfinv(2x-1)
+    p = 1 - cl  # 对应1-α分位
+    inv_phi = tf.math.sqrt(2.0) * tf.math.erfinv(2.0 * p - 1.0)
+
+    # 步骤2：计算标准正态分布在inv_phi处的概率密度函数 φ(Φ⁻¹(1-α))
+    # 标准正态PDF公式：φ(x) = (1/√(2π)) · exp(-x²/2)
+    phi = tf.math.exp(-0.5 * tf.square(inv_phi)) / tf.math.sqrt(2.0 * np.pi)
+
+    # 步骤3：闭式计算CVaR（核心公式）
+    # 上尾风险溢价项：(σ_ρ · φ) / α ，叠加均值得到最终CVaR
+    risk_premium = (cost_std * phi) / cl
+    cvar = cost_mean + risk_premium
+
+    return cvar
 
 def get_target_update(main_name, target_name, polyak):
     ''' Get a tensorflow op to update target variables based on main variables '''
@@ -712,55 +728,3 @@ def sac(env_fn, actor_fn=mlp_actor, critic_fn=mlp_critic, var_fn=mlp_var, ac_kwa
             logger.log_tabular('EpochTime', average_only=True)
             logger.log_tabular('TotalTime', time.time()-start_time)
             logger.dump_tabular()
-
-if __name__ == '__main__':
-    import json
-    import argparse
-    parser = argparse.ArgumentParser()
-    parser.add_argument('--env', type=str, default='Safexp-PointGoal1-v0')
-    parser.add_argument('--hid', type=int, default=256)
-    parser.add_argument('--l', type=int, default=2)
-    parser.add_argument('--gamma', type=float, default=0.99)
-    parser.add_argument('--cl', type=float, default=0.5)
-    parser.add_argument('--lr', type=float, default=1e-3)
-    parser.add_argument('--seed', '-s', type=int, default=0)
-    parser.add_argument('--epochs', type=int, default=100)
-    parser.add_argument('--exp_name', type=str, default='sac')
-    parser.add_argument('--steps_per_epoch', type=int, default=30000)
-    parser.add_argument('--update_freq', type=int, default=100)
-    parser.add_argument('--cpu', type=int, default=4)
-    parser.add_argument('--render', default=False, action='store_true')
-    parser.add_argument('--local_start_steps', default=500, type=int)
-    parser.add_argument('--local_update_after', default=500, type=int)
-    parser.add_argument('--batch_size', default=256, type=int)
-    parser.add_argument('--fixed_entropy_bonus', default=None, type=float)
-    parser.add_argument('--entropy_constraint', type=float, default= -1)
-    parser.add_argument('--fixed_cost_penalty', default=None, type=float)
-    parser.add_argument('--cost_constraint', type=float, default=None)
-    parser.add_argument('--cost_lim', type=float, default=None)
-    parser.add_argument('--lr_s', type=int, default=50)
-    parser.add_argument('--damp_s', type=int, default=10)
-    parser.add_argument('--logger_kwargs_str', type=json.loads, default='{"output_dir": "./data"}')
-    args = parser.parse_args()
-
-    try:
-        import safety_gym
-    except:
-        print('Make sure to install Safety Gym to use constrained RL environments.')
-
-    mpi_fork(args.cpu)
-
-    from wc_sac.utils.run_utils import setup_logger_kwargs
-    
-    logger_kwargs = setup_logger_kwargs(args.exp_name, args.seed)
-    logger_kwargs= args.logger_kwargs_str
-
-    sac(lambda : gym.make(args.env), actor_fn=mlp_actor, critic_fn=mlp_critic,
-        ac_kwargs=dict(hidden_sizes=[args.hid]*args.l),
-        gamma=args.gamma, cl=args.cl, seed=args.seed, epochs=args.epochs, batch_size=args.batch_size,
-        logger_kwargs=logger_kwargs, steps_per_epoch=args.steps_per_epoch,
-        update_freq=args.update_freq, lr=args.lr, render=args.render,
-        local_start_steps=args.local_start_steps, local_update_after=args.local_update_after,
-        fixed_entropy_bonus=args.fixed_entropy_bonus, entropy_constraint=args.entropy_constraint,
-        fixed_cost_penalty=args.fixed_cost_penalty, cost_constraint=args.cost_constraint, cost_lim = args.cost_lim, lr_scale = args.lr_s, damp_scale = args.damp_s,
-        )
