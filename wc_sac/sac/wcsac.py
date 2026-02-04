@@ -86,7 +86,7 @@ def gaussian_likelihood(x, mu, log_std):
     pre_sum = -0.5 * (((x-mu)/(tf.exp(log_std)+EPS))**2 + 2*log_std + np.log(2*np.pi))
     return tf.reduce_sum(pre_sum, axis=1)
 
-def cvar_from_mean_var(cost_mean, cost_var, cl):
+def cvar_from_mean_var(cost_mean, cost_var, alpha):
     """
     由抢占率（cost）的均值、方差闭式计算高斯分布下的CVaR
     核心公式：CVaR_α(ρ) = μ_ρ + (σ_ρ · φ(Φ⁻¹(1-α))) / α
@@ -95,14 +95,14 @@ def cvar_from_mean_var(cost_mean, cost_var, cl):
     参数：
         cost_mean: 抢占率均值 E[ρ]，形状 (batch,)
         cost_var : 抢占率方差 Var(ρ)，形状 (batch,)
-        cl: CVaR置信水平α（如0.1/0.5/0.9，代表关注最坏α比例场景）
+        alpha: CVaR显著性水平α，也即尾部比例（如0.1/0.5/0.9，代表关注最坏α比例场景，α越小风险厌恶程度越高）
     返回：
         cvar: 每个样本的CVaR值，形状 (batch,)，与输入维度完全一致
     """
     # 转换为TensorFlow张量并指定浮点类型，保证计算图兼容性
     cost_mean = tf.convert_to_tensor(cost_mean, dtype=tf.float32)
     cost_var = tf.convert_to_tensor(cost_var, dtype=tf.float32)
-    cl = tf.convert_to_tensor(cl, dtype=tf.float32)  # 置信水平转为张量，支持批量/标量
+    alpha = tf.convert_to_tensor(alpha, dtype=tf.float32)  # 置信水平转为张量，支持批量/标量
 
     # 数值稳定性处理：方差非负（避免数值误差导致负方差），标准差开方
     cost_var = tf.maximum(cost_var, 1e-8)  # 加极小值避免开方为0/负数
@@ -110,8 +110,8 @@ def cvar_from_mean_var(cost_mean, cost_var, cl):
 
     # 步骤1：计算标准正态分布的(1-α)分位数逆函数 Φ⁻¹(1-α)
     # tf.math.erfinv是逆误差函数，与标准正态分位数的转换关系：Φ⁻¹(x) = √2 · erfinv(2x-1)
-    p = 1 - cl  # 对应1-α分位
-    inv_phi = tf.math.sqrt(2.0) * tf.math.erfinv(2.0 * p - 1.0)
+    cl = 1 - alpha  # 对应1-α分位，置信水平
+    inv_phi = tf.math.sqrt(2.0) * tf.math.erfinv(2.0 * cl - 1.0)
 
     # 步骤2：计算标准正态分布在inv_phi处的概率密度函数 φ(Φ⁻¹(1-α))
     # 标准正态PDF公式：φ(x) = (1/√(2π)) · exp(-x²/2)
@@ -119,7 +119,7 @@ def cvar_from_mean_var(cost_mean, cost_var, cl):
 
     # 步骤3：闭式计算CVaR（核心公式）
     # 上尾风险溢价项：(σ_ρ · φ) / α ，叠加均值得到最终CVaR
-    risk_premium = (cost_std * phi) / cl
+    risk_premium = (cost_std * phi) / alpha
     cvar = cost_mean + risk_premium
 
     return cvar
