@@ -1,0 +1,27 @@
+# Project unified dependencies (data processing / environment / training)
+#
+# Installation:
+#   python -m pip install -r requirements.txt
+#
+# Notes:
+# - Training code requires TensorFlow 1.x (Python 3.6-3.8 only)
+# - TF1 uses environment marker to skip on newer Python versions
+# - Windows users may need: conda install -c conda-forge mpi4py mpich
+
+# Basic (required for data processing)
+numpy
+
+# Plotting (for excessive capacity curves)
+matplotlib
+
+# Dynamic pricing environment (Gym API)
+gym==0.15.3
+
+# Training/algorithm related
+scipy
+mpi4py
+
+# TensorFlow 1.x (use conda instead of pip for Python 3.7)
+# Note: pip may not find TF1.15.x, use: conda install -c anaconda tensorflow=1.15.0
+# tensorflow==1.15.0; python_version < "3.9"
+

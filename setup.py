@@ -23,7 +23,7 @@ setup(
     extras_require={
         # 环境依赖（仅当你需要运行 Gym 环境时安装）
         "env": ["gym==0.15.3"],
-        # 训练相关（如果你确实需要旧版依赖，可自行补充到这里）
-        # "train": [...],
+        # 训练相关（TF1 + MPI）。注意：通常要求 Python 3.7 左右的旧环境。
+        "train-tf1": ["scipy", "mpi4py", "tensorflow==1.15.5"],
     },
 )

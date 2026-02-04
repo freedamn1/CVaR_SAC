@@ -9,16 +9,13 @@ import time
 from wc_sac.utils.logx import EpochLogger
 from wc_sac.utils.mpi_tf import sync_all_params, MpiAdamOptimizer
 from wc_sac.utils.mpi_tools import mpi_fork, mpi_sum, proc_id, mpi_statistics_scalar, num_procs
-<<<<<<< HEAD
 from safety_gym.envs.engine import Engine
-=======
 try:
     # 仅在使用 Safety Gym 环境时需要；动态定价环境不依赖。
     from safety_gym.envs.engine import Engine  # type: ignore
 except Exception:
     Engine = None  # type: ignore
 
->>>>>>> 90bd2a2252c4e34920844c44c02da949381d401c
 from gym.envs.registration import register
 from scipy.stats import norm
 
@@ -90,6 +87,26 @@ def count_vars(scope):
 def gaussian_likelihood(x, mu, log_std):
     pre_sum = -0.5 * (((x-mu)/(tf.exp(log_std)+EPS))**2 + 2*log_std + np.log(2*np.pi))
     return tf.reduce_sum(pre_sum, axis=1)
+
+def cvar_from_mean_var(cost_mean, cost_var, cl):
+    """
+    由长期成本均值与方差计算 CVaR 的占位函数。
+
+    你当前的算法会用到：
+    - cost_mean: E[G_c | s] 或 E[G_c | s,a]（形状 (batch,)）
+    - cost_var : Var(G_c | s) 或 Var(G_c | s,a)（形状 (batch,)）
+    - cl: CVaR 置信水平（例如 0.5 / 0.9）
+
+    TODO(你来实现闭式公式): 返回每个样本的 CVaR（形状 (batch,)）。
+
+    目前为了保证训练图可构建，这里先返回 mean 作为占位（相当于风险中性）。
+    """
+    cost_mean = tf.convert_to_tensor(cost_mean, dtype=tf.float32)
+    cost_var = tf.convert_to_tensor(cost_var, dtype=tf.float32)
+    _ = cl  # 预留给闭式 CVaR 公式
+    cost_var = tf.maximum(cost_var, 0.0)
+    # placeholder: risk-neutral
+    return tf.identity(cost_mean)
 
 def get_target_update(main_name, target_name, polyak):
     ''' Get a tensorflow op to update target variables based on main variables '''
@@ -338,10 +355,13 @@ def sac(env_fn, actor_fn=mlp_actor, critic_fn=mlp_critic, var_fn=mlp_var, ac_kwa
             Units are (expectation of undiscounted sum of costs in a single episode).
             If None, cost_lim is not used, and if no cost constraints are used, do naive optimization.
     """
-    use_costs = fixed_cost_penalty or cost_constraint or cost_lim
-    
-    #for computing cvar
-    pdf_cdf = cl**(-1)*norm.pdf(norm.ppf(cl))
+    # 成本/风险约束开关：
+    # 你当前模型以 CVaR 为约束信号，不使用 cost_constraint 这一套折扣约束换算。
+    # - fixed_cost_penalty: 固定惩罚系数 beta
+    # - cost_lim: CVaR 约束阈值（由你在命令行传入）
+    use_costs = (fixed_cost_penalty is not None) or (cost_lim is not None)
+    if cost_constraint is not None and proc_id() == 0:
+        print("[warn] cost_constraint 已被忽略：当前实现使用 cost_lim 作为 CVaR 阈值。")
 
     logger = EpochLogger(**logger_kwargs)
     logger.save_config(locals())
@@ -436,19 +456,23 @@ def sac(env_fn, actor_fn=mlp_actor, critic_fn=mlp_critic, var_fn=mlp_var, ac_kwa
     qc_pi_var = tf.clip_by_value(qc_pi_var, 1e-8, 1e8)
     qc_pi_var_targ = tf.clip_by_value(qc_pi_var_targ, 1e-8, 1e8)
 
-    # Targets for Q and V regression
+    # Targets for Q and (cost mean/var) regression
     q_backup = tf.stop_gradient(r_ph + gamma*(1-d_ph)*(min_q_pi_targ - alpha * logp_pi2))
+    # 目标长期成本均值（Bellman）：E[G_c,t] = c_t + gamma * E_{a'~pi}[ E[G_c,t+1 | s', a'] ]
+    # 这里用单样本 a'=pi2 近似期望（与 SAC 常见实现一致）。
     qc_backup = tf.stop_gradient(c_ph + gamma*(1-d_ph)*qc_pi_targ)
-    qc_var_backup = tf.stop_gradient(c_ph ** 2 + 2 * gamma * c_ph * qc_pi_targ + gamma ** 2 * qc_pi_var_targ + gamma ** 2 * qc_pi_targ ** 2 - qc ** 2)
-    
-    qc_var_backup = tf.clip_by_value(qc_var_backup, 1e-8, 1e8)
-    
-    cost_constraint = cost_lim * (1 - gamma ** max_ep_len) / (1 - gamma) / max_ep_len
-    damp = damp_scale * tf.reduce_mean(cost_constraint - qc - pdf_cdf * tf.sqrt(qc_var))
+    # 目标长期成本方差：Var[G_c,t] = gamma^2 * E_{a'~pi}[ Var[G_c,t+1 | s', a'] ]
+    qc_var_backup = tf.stop_gradient((gamma**2) * (1-d_ph) * qc_pi_var_targ)
+    qc_var_backup = tf.clip_by_value(qc_var_backup, 0.0, 1e8)
+
+    # CVaR（占位函数，你会自行替换成闭式）
+    qc_cvar = cvar_from_mean_var(qc, qc_var, cl)
+    qc_pi_cvar = cvar_from_mean_var(qc_pi, qc_pi_var, cl)
 
     # Soft actor-critic losses
 
-    pi_loss = tf.reduce_mean(alpha * logp_pi - min_q_pi + (beta - damp) * (qc_pi + pdf_cdf * (qc_pi_var ** 0.5)))
+    # 策略更新：用 CVaR 作为成本约束信号
+    pi_loss = tf.reduce_mean(alpha * logp_pi - min_q_pi + beta * qc_pi_cvar)
 
     qr1_loss = 0.5 * tf.reduce_mean((q_backup - qr1)**2)
     qr2_loss = 0.5 * tf.reduce_mean((q_backup - qr2)**2)
@@ -463,18 +487,17 @@ def sac(env_fn, actor_fn=mlp_actor, critic_fn=mlp_critic, var_fn=mlp_var, ac_kwa
     alpha_loss = - alpha * (entropy_constraint - pi_entropy)
     print('using entropy constraint', entropy_constraint)
 
-    # Loss for beta
+    # Loss for beta（对偶变量）：推动 CVaR <= cost_lim
     if use_costs:
-        if cost_constraint is None:
-            # Convert assuming equal cost accumulated each step
-            # Note this isn't the case, since the early in episode doesn't usually have cost,
-            # but since our algorithm optimizes the discounted infinite horizon from each entry
-            # in the replay buffer, we should be approximately correct here.
-            # It's worth checking empirical total undiscounted costs to see if they match.
-            cost_constraint = cost_lim * (1 - gamma ** max_ep_len) / (1 - gamma) / max_ep_len
-        print('using cost constraint', cost_constraint)
-        beta_loss = beta * (cost_constraint - qc - pdf_cdf * tf.sqrt(qc_var))
-        #beta_loss = beta * (cost_constraint - qc)
+        if fixed_cost_penalty is None:
+            if cost_lim is None:
+                raise ValueError("use_costs=True 且 fixed_cost_penalty=None 时，必须提供 cost_lim（CVaR 阈值）。")
+            if proc_id() == 0:
+                print('using CVaR cost_lim', cost_lim)
+            beta_loss = beta * (float(cost_lim) - qc_cvar)
+        else:
+            # 固定惩罚系数时，不训练 beta；这里给一个可记录的占位 loss
+            beta_loss = tf.constant(0.0, dtype=tf.float32)
 
     # Policy train op
     # (has to be separate from value train op, because qr1_pi appears in pi_loss)

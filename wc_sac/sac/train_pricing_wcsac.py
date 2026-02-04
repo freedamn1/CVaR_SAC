@@ -21,6 +21,7 @@ from wc_sac.envs.preemptive_pricing_env import (
     ExcessiveCapacitySeries,
 )
 from wc_sac.sac.wcsac import sac
+from wc_sac.utils.run_utils import setup_logger_kwargs
 
 
 def make_poisson_rates(eta: float, thet: float, k: float, omega: float):
@@ -98,6 +99,9 @@ def main():
     def env_fn():
         return PreemptivePricingEnv(series, cfg, f_arrival_rate=f, g_departure_rate=g)
 
+    # 设置日志配置
+    logger_kwargs = setup_logger_kwargs(args.exp_name, seed=args.seed)
+
     sac(
         env_fn,
         ac_kwargs=dict(hidden_sizes=[args.hid] * args.l),
@@ -120,6 +124,7 @@ def main():
         damp_scale=args.damp_s,
         reward_scale=args.reward_scale,
         max_ep_len=args.horizon,
+        logger_kwargs=logger_kwargs,
     )
 
 

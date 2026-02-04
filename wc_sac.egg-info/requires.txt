@@ -2,3 +2,8 @@ numpy
 
 [env]
 gym==0.15.3
+
+[train-tf1]
+scipy
+mpi4py
+tensorflow==1.15.5

@@ -6,6 +6,10 @@ License-File: LICENSE
 Requires-Dist: numpy
 Provides-Extra: env
 Requires-Dist: gym==0.15.3; extra == "env"
+Provides-Extra: train-tf1
+Requires-Dist: scipy; extra == "train-tf1"
+Requires-Dist: mpi4py; extra == "train-tf1"
+Requires-Dist: tensorflow==1.15.5; extra == "train-tf1"
 Dynamic: license-file
 Dynamic: provides-extra
 Dynamic: requires-dist
