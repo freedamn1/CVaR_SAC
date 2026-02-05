@@ -180,9 +180,19 @@ def mlp_actor(x, a, name='pi', hidden_sizes=(64,64), activation=tf.nn.relu,
         mu, pi, logp_pi = apply_squashing_func(mu, pi, logp_pi)
 
     # make sure actions are in correct range
-    action_scale = action_space.high[0]
-    mu *= action_scale
-    pi *= action_scale
+    # Map tanh outputs in [-1,1] to [low, high] per action dimension
+    # action_space.low/high are numpy arrays; compute affine mapping x = scale * z + mid
+    action_low = np.array(action_space.low, dtype=np.float32)
+    action_high = np.array(action_space.high, dtype=np.float32)
+    scale = (action_high - action_low) / 2.0
+    mid = (action_high + action_low) / 2.0
+    scale_tf = tf.constant(scale, dtype=tf.float32)
+    mid_tf = tf.constant(mid, dtype=tf.float32)
+    mu = mu * scale_tf + mid_tf
+    pi = pi * scale_tf + mid_tf
+    # Adjust log probability for affine scaling: subtract sum(log|scale|)
+    # (Jacobian determinant of affine map is product(scale) across dims)
+    logp_pi -= tf.reduce_sum(tf.log(tf.clip_by_value(scale_tf, 1e-8, 1e8)))
 
     return mu, pi, logp_pi
 

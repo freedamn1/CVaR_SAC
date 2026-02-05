@@ -1,4 +1,4 @@
-Metadata-Version: 2.4
+Metadata-Version: 2.1
 Name: wc_sac
 Version: 0.0.0
 Requires-Python: >=3.6
@@ -10,7 +10,3 @@ Provides-Extra: train-tf1
 Requires-Dist: scipy; extra == "train-tf1"
 Requires-Dist: mpi4py; extra == "train-tf1"
 Requires-Dist: tensorflow==1.15.5; extra == "train-tf1"
-Dynamic: license-file
-Dynamic: provides-extra
-Dynamic: requires-dist
-Dynamic: requires-python

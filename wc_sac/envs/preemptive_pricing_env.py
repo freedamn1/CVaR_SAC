@@ -51,7 +51,7 @@ class PricingEnvConfig:
     p_max: float
     dt: float  # seconds
     horizon: int  # steps per episode
-    n0: float = 0.0
+    n0: float = 10.0
     eps: float = 1e-8
     seed: Optional[int] = None
 
@@ -101,8 +101,11 @@ class PreemptivePricingEnv(gym.Env):
         self.f = f_arrival_rate
         self.g = g_departure_rate
 
-        # 归一化动作，避免 wcsac.py 的对称缩放假设踩坑
-        self.action_space = gym.spaces.Box(low=-1.0, high=1.0, shape=(1,), dtype=np.float32)
+        # 动作直接为价格，范围由配置 p_min/p_max 决定
+        # 动作直接为价格，范围由配置 p_min/p_max 决定（使用 scalar bounds）
+        low = float(self.cfg.p_min)
+        high = float(self.cfg.p_max)
+        self.action_space = gym.spaces.Box(low=low, high=high, shape=(1,), dtype=np.float32)
         self.series.excessive_capacity_cpu = normalize_to_0_100(self.series.excessive_capacity_cpu)
         # 观测：C_t, N_t
         self.observation_space = gym.spaces.Box(low=-np.inf, high=np.inf, shape=(2,), dtype=np.float32)
@@ -135,14 +138,13 @@ class PreemptivePricingEnv(gym.Env):
 
         lam_a = max(float(self.f(price)) * float(self.cfg.dt), 0.0)
         lam_l = max(float(self.g(price)) * float(self.cfg.dt), 0.0)
-        # arrivals = float(self._rng.poisson(lam_a))
-        # leaves = float(self._rng.poisson(lam_l))
-        arrivals = lam_a
-        leaves = lam_l
-
-        preempted = max(arrivals - leaves - c_t, 0.0)
+        arrivals = float(self._rng.poisson(lam_a))
+        leaves = float(self._rng.poisson(lam_l))
+        # arrivals = lam_a
+        # leaves = lam_l
+        preempted = max(n_t + arrivals - leaves - c_t, 0.0)
         n_next = max(n_t + arrivals - leaves - preempted, 0.0)
-
+        print(f"arrivals: {arrivals}, leaves: {leaves}, preempted: {preempted}, n_next: {n_next}, c_t: {c_t}")
         reward = price * n_t * float(self.cfg.dt)
         cost = preempted / max(n_t, float(self.cfg.eps))
 

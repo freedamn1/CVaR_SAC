@@ -56,10 +56,10 @@ def main():
     parser.add_argument("--seed", type=int, default=0)
 
     # 泊松率函数参数：f(p)=eta*(1-p**k)**omega, g(p)=thet-thet*(1-p**k)**omega
-    parser.add_argument("--eta", type=float, default=10.0, help="arrival scale eta")
-    parser.add_argument("--thet", type=float, default=5.0, help="leave scale thet")
-    parser.add_argument("--k", type=float, default=1.0, help="exponent k on p")
-    parser.add_argument("--omega", type=float, default=1.0, help="power omega on (1-p**k)")
+    parser.add_argument("--eta", type=float, default=0.4, help="arrival scale eta")
+    parser.add_argument("--thet", type=float, default=0.05, help="leave scale thet")
+    parser.add_argument("--k", type=float, default=1.5, help="exponent k on p")
+    parser.add_argument("--omega", type=float, default=3.0, help="power omega on (1-p**k)")
 
     # 训练超参：保持与原 wcsac.py 一致的命名
     parser.add_argument("--hid", type=int, default=256)
