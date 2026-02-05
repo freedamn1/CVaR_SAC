@@ -6,7 +6,7 @@
 2) 再运行本脚本，用 excessive_capacity_cpu 驱动环境状态 C_t
 
 示例：
-python -m wc_sac.sac.train_pricing_wcsac --excessive_capacity_npz excessive_capacity_cpu.npz --p_min 0.1 --p_max 1.0 --dt 300 --horizon 288 --cost_lim 10
+python -m wc_sac.sac.train_pricing_wcsac --excessive_capacity_npz wc_sac/dataset/excessive_capacity_cpu.npz --p_min 0.1 --p_max 1.0 --dt 300 --horizon 288 --cost_lim 10
 """
 
 from __future__ import annotations
@@ -47,9 +47,9 @@ def make_poisson_rates(eta: float, thet: float, k: float, omega: float):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--excessive_capacity_npz", type=str, required=True)
-    parser.add_argument("--p_min", type=float, required=True)
-    parser.add_argument("--p_max", type=float, required=True)
+    parser.add_argument("--excessive_capacity_npz", type=str, default="wc_sac/dataset/excessive_capacity_cpu_300sec.npz")
+    parser.add_argument("--p_min", type=float, default=0.01)
+    parser.add_argument("--p_max", type=float, default=1.0)
     parser.add_argument("--dt", type=float, default=300.0)
     parser.add_argument("--horizon", type=int, default=288)
     parser.add_argument("--n0", type=float, default=0.0)
@@ -65,7 +65,7 @@ def main():
     parser.add_argument("--hid", type=int, default=256)
     parser.add_argument("--l", type=int, default=2)
     parser.add_argument("--gamma", type=float, default=0.99)
-    parser.add_argument("--cl", type=float, default=0.5)
+    parser.add_argument("--alpha_sig_level", type=float, default=0.5, help="CVaR significance level (tail proportion), e.g., 0.1 for worst 10%%")
     parser.add_argument("--lr", type=float, default=1e-3)
     parser.add_argument("--epochs", type=int, default=100)
     parser.add_argument("--exp_name", type=str, default="pricing_wcsac")
@@ -78,8 +78,7 @@ def main():
     parser.add_argument("--fixed_entropy_bonus", default=None, type=float)
     parser.add_argument("--entropy_constraint", type=float, default=-1)
     parser.add_argument("--fixed_cost_penalty", default=None, type=float)
-    parser.add_argument("--cost_constraint", type=float, default=None)
-    parser.add_argument("--cost_lim", type=float, required=True)
+    parser.add_argument("--cost_lim", type=float, default=0.5)
     parser.add_argument("--lr_s", type=int, default=50)
     parser.add_argument("--damp_s", type=int, default=10)
     parser.add_argument("--reward_scale", type=float, default=1.0)
@@ -106,7 +105,7 @@ def main():
         env_fn,
         ac_kwargs=dict(hidden_sizes=[args.hid] * args.l),
         gamma=args.gamma,
-        cl=args.cl,
+        alpha_sig_level=args.alpha_sig_level,
         seed=args.seed,
         epochs=args.epochs,
         batch_size=args.batch_size,
@@ -118,7 +117,6 @@ def main():
         fixed_entropy_bonus=args.fixed_entropy_bonus,
         entropy_constraint=args.entropy_constraint,
         fixed_cost_penalty=args.fixed_cost_penalty,
-        cost_constraint=args.cost_constraint,
         cost_lim=args.cost_lim,
         lr_scale=args.lr_s,
         damp_scale=args.damp_s,

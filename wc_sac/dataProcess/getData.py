@@ -11,7 +11,8 @@ Alibaba 2017 cluster traces：数据预处理入口。
    - server_event.csv（机器容量）
 
 用法：
-  python getData.py --data_dir <dir> --out_npz excessive_capacity_cpu.npz --dt_seconds 300
+  python getData.py --data_dir <dir> --dt_seconds 300
+  # 默认输出到 dataset/ 目录：excessive_capacity_cpu_10sec.npz 和 excessive_capacity_cpu.npz
 """
 
 from __future__ import annotations
@@ -35,14 +36,14 @@ def main() -> None:
     parser.add_argument(
         "--out_npz_10sec",
         type=str,
-        default="excessive_capacity_cpu_10sec.npz",
-        help="10 秒级别输出文件（npz，含 dt_seconds/capacity_cpu/times/usage_cpu/excessive_capacity_cpu）",
+        default=None,
+        help="10 秒级别输出文件（npz，含 dt_seconds/capacity_cpu/times/usage_cpu/excessive_capacity_cpu）。默认保存到 dataset/ 目录",
     )
     parser.add_argument(
         "--out_npz",
         type=str,
-        default="excessive_capacity_cpu.npz",
-        help="环境使用输出文件（npz，含 dt_seconds/capacity_cpu/times/usage_cpu/excessive_capacity_cpu）",
+        default=None,
+        help="环境使用输出文件（npz，含 dt_seconds/capacity_cpu/times/usage_cpu/excessive_capacity_cpu）。默认保存到 dataset/ 目录",
     )
     parser.add_argument(
         "--capacity_cpu",
@@ -52,9 +53,21 @@ def main() -> None:
     )
     args = parser.parse_args()
 
-    out_path_10 = Path(args.out_npz_10sec).expanduser().resolve()
+    # 默认输出到 dataset 目录（与 data_dir 相同，因为 data_dir 通常就是 dataset）
+    data_dir = Path(args.data_dir).expanduser().resolve()
+    dataset_dir = data_dir  # 输出到与输入数据相同的目录
+    
+    if args.out_npz_10sec is None:
+        out_path_10 = dataset_dir / "excessive_capacity_cpu_10sec.npz"
+    else:
+        out_path_10 = Path(args.out_npz_10sec).expanduser().resolve()
+    
+    if args.out_npz is None:
+        out_path_env = dataset_dir / "excessive_capacity_cpu.npz"
+    else:
+        out_path_env = Path(args.out_npz).expanduser().resolve()
+    
     out_path_10.parent.mkdir(parents=True, exist_ok=True)
-    out_path_env = Path(args.out_npz).expanduser().resolve()
     out_path_env.parent.mkdir(parents=True, exist_ok=True)
 
     print("[info] 使用 Alibaba 2018 数据源")

@@ -15,8 +15,9 @@ def normalize_to_0_100(x: np.ndarray) -> np.ndarray:
     return ((x - x_min) / (x_max - x_min) * 100.0).astype(np.float32)
 # npz keys: ['dt_seconds', 'capacity_cpu', 'times', 'usage_cpu', 'excessive_capacity_cpu']
 # total capacityy = 387168.0
-# 1) 加载 npz
-path = Path(r"D:\project\python_project\wxsac\CVaR_SAC\wc_sac\dataProcess\excessive_capacity_cpu_10sec.npz")
+# 1) 加载 npz（从 dataset 目录）
+base_dir = Path(__file__).resolve().parent.parent
+path = base_dir / "dataset" / "excessive_capacity_cpu_10sec.npz"
 
 # 详细检查 npz 内容
 data = np.load(str(path), allow_pickle=True)

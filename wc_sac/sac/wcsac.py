@@ -102,7 +102,7 @@ def cvar_from_mean_var(cost_mean, cost_var, alpha):
     # 转换为TensorFlow张量并指定浮点类型，保证计算图兼容性
     cost_mean = tf.convert_to_tensor(cost_mean, dtype=tf.float32)
     cost_var = tf.convert_to_tensor(cost_var, dtype=tf.float32)
-    alpha = tf.convert_to_tensor(alpha, dtype=tf.float32)  # 置信水平转为张量，支持批量/标量
+    alpha = tf.convert_to_tensor(alpha, dtype=tf.float32)  # 显著性水平转为张量，支持批量/标量
 
     # 数值稳定性处理：方差非负（避免数值误差导致负方差），标准差开方
     cost_var = tf.maximum(cost_var, 1e-8)  # 加极小值避免开方为0/负数
@@ -261,12 +261,12 @@ class ReplayBuffer:
 Soft Actor-Critic
 """
 def sac(env_fn, actor_fn=mlp_actor, critic_fn=mlp_critic, var_fn=mlp_var, ac_kwargs=dict(), seed=0,
-        steps_per_epoch=1000, epochs=100, replay_size=int(1e6), gamma=0.99, cl = 0.5,
+        steps_per_epoch=1000, epochs=100, replay_size=int(1e6), gamma=0.99, alpha_sig_level=0.5,
         polyak=0.995, lr=1e-4, batch_size=1024, local_start_steps=int(1e3),
         max_ep_len=1000, logger_kwargs=dict(), save_freq=10, local_update_after=int(1e3),
         update_freq=1, render=False, 
         fixed_entropy_bonus=None, entropy_constraint=-1.0,
-        fixed_cost_penalty=None, cost_constraint=None, cost_lim=None,
+        fixed_cost_penalty=None, cost_lim=None,
         reward_scale=1, lr_scale = 1, damp_scale = 0,
         ):
     """
@@ -346,6 +346,11 @@ def sac(env_fn, actor_fn=mlp_actor, critic_fn=mlp_critic, var_fn=mlp_var, ac_kwa
         save_freq (int): How often (in terms of gap between epochs) to save
             the current policy and value function.
 
+        alpha_sig_level (float): CVaR significance level (tail proportion).
+            Represents the worst-case α proportion of scenarios to focus on.
+            Examples: 0.1 (focus on worst 10%), 0.5 (worst 50%), 0.9 (worst 90%).
+            Smaller values indicate higher risk aversion.
+
         fixed_entropy_bonus (float or None): Fixed bonus to reward for entropy.
             Units are (points of discounted sum of future reward) / (nats of policy entropy).
             If None, use ``entropy_constraint`` to set bonus value instead.
@@ -357,27 +362,16 @@ def sac(env_fn, actor_fn=mlp_actor, critic_fn=mlp_critic, var_fn=mlp_var, ac_kwa
 
         fixed_cost_penalty (float or None): Fixed penalty to reward for cost.
             Units are (points of discounted sum of future reward) / (points of discounted sum of future costs).
-            If None, use ``cost_constraint`` to set penalty value instead.
+            If None, use ``cost_lim`` to set penalty value instead (beta will be learned).
 
-        cost_constraint (float or None): If ``fixed_cost_penalty`` is None,
-            Adjust cost penalty to maintain at most this much cost.
-            Units are (points of discounted sum of future costs).
-            Note: to get an approximate cost_constraint from a cost_lim (undiscounted sum of costs),
-            multiply cost_lim by (1 - gamma ** episode_len) / (1 - gamma).
-            If None, use cost_lim to calculate constraint.
-
-        cost_lim (float or None): If ``cost_constraint`` is None,
-            calculate an approximate constraint cost from this cost limit.
+        cost_lim (float or None): CVaR constraint threshold.
             Units are (expectation of undiscounted sum of costs in a single episode).
-            If None, cost_lim is not used, and if no cost constraints are used, do naive optimization.
+            If None and fixed_cost_penalty is None, no cost constraints are used (naive optimization).
     """
     # 成本/风险约束开关：
-    # 你当前模型以 CVaR 为约束信号，不使用 cost_constraint 这一套折扣约束换算。
     # - fixed_cost_penalty: 固定惩罚系数 beta
     # - cost_lim: CVaR 约束阈值（由你在命令行传入）
     use_costs = (fixed_cost_penalty is not None) or (cost_lim is not None)
-    if cost_constraint is not None and proc_id() == 0:
-        print("[warn] cost_constraint 已被忽略：当前实现使用 cost_lim 作为 CVaR 阈值。")
 
     logger = EpochLogger(**logger_kwargs)
     logger.save_config(locals())
@@ -481,9 +475,9 @@ def sac(env_fn, actor_fn=mlp_actor, critic_fn=mlp_critic, var_fn=mlp_var, ac_kwa
     qc_var_backup = tf.stop_gradient((gamma**2) * (1-d_ph) * qc_pi_var_targ)
     qc_var_backup = tf.clip_by_value(qc_var_backup, 0.0, 1e8)
 
-    # CVaR（占位函数，你会自行替换成闭式）
-    qc_cvar = cvar_from_mean_var(qc, qc_var, cl)
-    qc_pi_cvar = cvar_from_mean_var(qc_pi, qc_pi_var, cl)
+    # CVaR（使用显著性水平 alpha_sig_level）
+    qc_cvar = cvar_from_mean_var(qc, qc_var, alpha_sig_level)
+    qc_pi_cvar = cvar_from_mean_var(qc_pi, qc_pi_var, alpha_sig_level)
 
     # Soft actor-critic losses
 
@@ -635,6 +629,11 @@ def sac(env_fn, actor_fn=mlp_actor, critic_fn=mlp_critic, var_fn=mlp_var, ac_kwa
 
         # Store experience to replay buffer
         replay_buffer.store(o, a, r, o2, d, c)
+        
+        # 打印经验值（每隔一定步数或episode结束时打印，避免输出过多）
+        if proc_id() == 0 and (local_steps % 100 == 0 or d or ep_len == max_ep_len):
+            print(f"[exp] step={local_steps:6d} | obs={o} | action={a} | reward={r:8.4f} | cost={c:8.4f} | "
+                  f"next_obs={o2} | done={d} | ep_len={ep_len:3d} | ep_ret={ep_ret:8.2f} | ep_cost={ep_cost:8.4f}")
 
         # Super critical, easy to overlook step: make sure to update
         # most recent observation!

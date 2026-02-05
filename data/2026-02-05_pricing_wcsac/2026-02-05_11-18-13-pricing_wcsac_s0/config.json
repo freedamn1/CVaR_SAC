@@ -1,0 +1,55 @@
+{
+    "ac_kwargs":	{
+        "hidden_sizes":	[
+            256,
+            256
+        ]
+    },
+    "actor_fn":	"mlp_actor",
+    "alpha_sig_level":	0.5,
+    "batch_size":	256,
+    "cost_lim":	0.5,
+    "critic_fn":	"mlp_critic",
+    "damp_scale":	10,
+    "entropy_constraint":	-1,
+    "env_fn":	"env_fn",
+    "epochs":	100,
+    "exp_name":	"pricing_wcsac",
+    "fixed_cost_penalty":	null,
+    "fixed_entropy_bonus":	null,
+    "gamma":	0.99,
+    "local_start_steps":	500,
+    "local_update_after":	500,
+    "logger":	{
+        "<wc_sac.utils.logx.EpochLogger object at 0x0000023A8D67E7B0>":	{
+            "epoch_dict":	{},
+            "exp_name":	"pricing_wcsac",
+            "first_row":	true,
+            "log_current_row":	{},
+            "log_headers":	[],
+            "output_dir":	"D:\\project\\python_project\\wxsac\\CVaR_SAC\\data\\2026-02-05_pricing_wcsac\\2026-02-05_11-18-13-pricing_wcsac_s0",
+            "output_file":	{
+                "<_io.TextIOWrapper name='D:\\\\project\\\\python_project\\\\wxsac\\\\CVaR_SAC\\\\data\\\\2026-02-05_pricing_wcsac\\\\2026-02-05_11-18-13-pricing_wcsac_s0\\\\progress.txt' mode='w' encoding='cp936'>":	{
+                    "mode":	"w"
+                }
+            }
+        }
+    },
+    "logger_kwargs":	{
+        "exp_name":	"pricing_wcsac",
+        "output_dir":	"D:\\project\\python_project\\wxsac\\CVaR_SAC\\data\\2026-02-05_pricing_wcsac\\2026-02-05_11-18-13-pricing_wcsac_s0"
+    },
+    "lr":	0.001,
+    "lr_scale":	50,
+    "max_ep_len":	288,
+    "polyak":	0.995,
+    "render":	false,
+    "replay_size":	1000000,
+    "reward_scale":	1.0,
+    "save_freq":	10,
+    "seed":	0,
+    "steps_per_epoch":	30000,
+    "update_freq":	100,
+    "use_costs":	true,
+    "var_fn":	"mlp_var"
+}
