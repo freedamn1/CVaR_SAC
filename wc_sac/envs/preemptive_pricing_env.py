@@ -9,7 +9,8 @@ from __future__ import annotations
   - N_t：当前运行的抢占式实例数量（定义的抽象“实例数”）
 
 动作：
-  a_t：归一化动作 in [-1, 1]，环境内部映射到价格 p_t ∈ [p_min, p_max]
+  a_t：归一化动作 in [-1, 1]，环境内部映射到价格 p_t ∈ [p_min, p_max]，
+       并将价格离散化到固定档位（默认 0.1~1.0，步长 0.1，且按 p_min/p_max 过滤可用档位）
 
 动态：
   A_t ~ Poisson(f(p_t) * dt)
@@ -101,11 +102,8 @@ class PreemptivePricingEnv(gym.Env):
         self.f = f_arrival_rate
         self.g = g_departure_rate
 
-        # 动作直接为价格，范围由配置 p_min/p_max 决定
-        # 动作直接为价格，范围由配置 p_min/p_max 决定（使用 scalar bounds）
-        low = float(self.cfg.p_min)
-        high = float(self.cfg.p_max)
-        self.action_space = gym.spaces.Box(low=low, high=high, shape=(1,), dtype=np.float32)
+        # 动作：归一化 a_norm ∈ [-1, 1]
+        self.action_space = gym.spaces.Box(low=-1.0, high=1.0, shape=(1,), dtype=np.float32)
         self.series.excessive_capacity_cpu = normalize_to_0_100(self.series.excessive_capacity_cpu)
         # 观测：C_t, N_t
         self.observation_space = gym.spaces.Box(low=-np.inf, high=np.inf, shape=(2,), dtype=np.float32)
@@ -113,15 +111,36 @@ class PreemptivePricingEnv(gym.Env):
         self._rng = np.random.RandomState(cfg.seed)
         self._t = 0
         self._n = float(cfg.n0)
+        # 离散价格档位：默认 0.1, 0.2, ..., 1.0；并按 p_min/p_max 过滤可用档位
+        base_levels = np.round(np.arange(0.1, 1.01, 0.1), 2).astype(np.float32)
+        p_min = float(self.cfg.p_min)
+        p_max = float(self.cfg.p_max)
+        levels = base_levels[(base_levels >= (p_min - 1e-6)) & (base_levels <= (p_max + 1e-6))]
+        if levels.size == 0:
+            raise ValueError(
+                f"离散价格档位 0.1~1.0 与 p_min/p_max 不相交：p_min={p_min}, p_max={p_max}。"
+                "请调整 p_min/p_max 使其覆盖至少一个离散价格点（如 0.1）。"
+            )
+        self._price_levels = levels
 
     def seed(self, seed: Optional[int] = None):
         if seed is None:
             return
         self._rng = np.random.RandomState(int(seed))
 
+    def _discretize_price(self, price: float) -> float:
+        """把连续价格离散到最近的档位（self._price_levels）。"""
+        p = float(price)
+        idx = int(np.argmin(np.abs(self._price_levels - p)))
+        return float(self._price_levels[idx])
+
     def _action_to_price(self, a_norm: float) -> float:
+        """归一化动作 [-1,1] → 连续价格 [p_min,p_max] → 离散化到固定档位。"""
         a = float(np.clip(a_norm, -1.0, 1.0))
-        return float(self.cfg.p_min + (a + 1.0) * 0.5 * (self.cfg.p_max - self.cfg.p_min))
+        p_cont = float(self.cfg.p_min + (a + 1.0) * 0.5 * (self.cfg.p_max - self.cfg.p_min))
+        p_disc = self._discretize_price(p_cont)
+        # 最后再保险裁剪到 [p_min, p_max]
+        return float(np.clip(p_disc, float(self.cfg.p_min), float(self.cfg.p_max)))
 
     def reset(self):
         self._t = 0
@@ -144,9 +163,10 @@ class PreemptivePricingEnv(gym.Env):
         # leaves = lam_l
         preempted = max(n_t + arrivals - leaves - c_t, 0.0)
         n_next = max(n_t + arrivals - leaves - preempted, 0.0)
-        print(f"arrivals: {arrivals}, leaves: {leaves}, preempted: {preempted}, n_next: {n_next}, c_t: {c_t}")
+        if self._t % 10 == 0:  
+            print(f"local_step: {self._t}, price: {price}, arrivals: {arrivals}, leaves: {leaves}, preempted: {preempted}, n_next: {n_next}, c_t: {c_t}")
         reward = price * n_t * float(self.cfg.dt)
-        cost = preempted / max(n_t, float(self.cfg.eps))
+        cost = preempted / max(n_next + preempted, float(self.cfg.eps))
 
         # advance time
         self._t += 1

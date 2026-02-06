@@ -9,6 +9,8 @@ if tf.__version__.startswith('2'):
     tf_v1.disable_eager_execution()
     tf = tf_v1
 import time
+import atexit
+import os.path as osp
 from wc_sac.utils.logx import EpochLogger
 from wc_sac.utils.mpi_tf import sync_all_params, MpiAdamOptimizer
 from wc_sac.utils.mpi_tools import mpi_fork, mpi_sum, proc_id, mpi_statistics_scalar, num_procs
@@ -278,6 +280,8 @@ def sac(env_fn, actor_fn=mlp_actor, critic_fn=mlp_critic, var_fn=mlp_var, ac_kwa
         fixed_entropy_bonus=None, entropy_constraint=-1.0,
         fixed_cost_penalty=None, cost_lim=None,
         reward_scale=1, lr_scale = 1, damp_scale = 0,
+        zeta=0.0,
+        train_print_freq=10,
         ):
     """
 
@@ -386,6 +390,16 @@ def sac(env_fn, actor_fn=mlp_actor, critic_fn=mlp_critic, var_fn=mlp_var, ac_kwa
     logger = EpochLogger(**logger_kwargs)
     logger.save_config(locals())
 
+    # Optional per-update training log (written to file, not stdout).
+    train_log_f = None
+    if proc_id() == 0:
+        try:
+            train_log_path = osp.join(logger.output_dir, "train_updates.txt")
+            train_log_f = open(train_log_path, "a", buffering=1, encoding="utf-8")
+            atexit.register(train_log_f.close)
+        except Exception:
+            train_log_f = None
+
     # Env instantiation    
     env, test_env = env_fn(), env_fn()
     
@@ -486,13 +500,17 @@ def sac(env_fn, actor_fn=mlp_actor, critic_fn=mlp_critic, var_fn=mlp_var, ac_kwa
     qc_var_backup = tf.clip_by_value(qc_var_backup, 0.0, 1e8)
 
     # CVaR（使用显著性水平 alpha_sig_level）
-    qc_cvar = cvar_from_mean_var(qc, qc_var, alpha_sig_level)
     qc_pi_cvar = cvar_from_mean_var(qc_pi, qc_pi_var, alpha_sig_level)
 
     # Soft actor-critic losses
 
     # 策略更新：用 CVaR 作为成本约束信号
     pi_loss = tf.reduce_mean(alpha * logp_pi - min_q_pi + beta * qc_pi_cvar)
+
+    # Components for debugging / logging (so we can reproduce pi_loss from logs)
+    pi_ent_term = tf.reduce_mean(alpha * logp_pi)          # entropy bonus term (can be negative)
+    pi_q_term = tf.reduce_mean(min_q_pi)                   # expected reward Q under policy
+    pi_cost_term = tf.reduce_mean(beta * qc_pi_cvar)       # cost CVaR penalty term
 
     qr1_loss = 0.5 * tf.reduce_mean((q_backup - qr1)**2)
     qr2_loss = 0.5 * tf.reduce_mean((q_backup - qr2)**2)
@@ -507,14 +525,24 @@ def sac(env_fn, actor_fn=mlp_actor, critic_fn=mlp_critic, var_fn=mlp_var, ac_kwa
     alpha_loss = - alpha * (entropy_constraint - pi_entropy)
     print('using entropy constraint', entropy_constraint)
 
-    # Loss for beta（对偶变量）：推动 CVaR <= cost_lim
+    # Loss for beta（对偶变量）
     if use_costs:
         if fixed_cost_penalty is None:
             if cost_lim is None:
                 raise ValueError("use_costs=True 且 fixed_cost_penalty=None 时，必须提供 cost_lim（CVaR 阈值）。")
+            if not (0.0 <= float(zeta) < 1.0):
+                raise ValueError(f"zeta 必须在 [0, 1) 内，当前为 {zeta}.")
             if proc_id() == 0:
                 print('using CVaR cost_lim', cost_lim)
-            beta_loss = beta * (float(cost_lim) - qc_cvar)
+            # 目标：把当前策略下的长期成本风险 qc_pi_cvar 约束到 (cost_lim*(1-zeta), cost_lim) 区间内。
+            # - 若 qc_pi_cvar > cost_lim：增大 beta（更强惩罚）把风险压回去；
+            # - 若 qc_pi_cvar < cost_lim*(1-zeta)：减小 beta（更弱惩罚）允许风险上升；
+            # - 若在区间内：beta_loss=0，不更新 beta（避免 beta 持续衰减到 0）。
+            upper = float(cost_lim)
+            lower = float(cost_lim) * (1.0 - float(zeta))
+            upper_vio = tf.nn.relu(qc_pi_cvar - upper)   # >0 only when above upper bound
+            lower_vio = tf.nn.relu(lower - qc_pi_cvar)   # >0 only when below lower bound
+            beta_loss = beta * (lower_vio - upper_vio)
         else:
             # 固定惩罚系数时，不训练 beta；这里给一个可记录的占位 loss
             beta_loss = tf.constant(0.0, dtype=tf.float32)
@@ -595,7 +623,11 @@ def sac(env_fn, actor_fn=mlp_actor, critic_fn=mlp_critic, var_fn=mlp_var, ac_kwa
     # variables to measure in an update
     vars_to_get = dict(LossPi=pi_loss, LossQR1=qr1_loss, LossQR2=qr2_loss, LossQC=qc_loss, LossQCVar=qc_var_loss,
                        QR1Vals=qr1, QR2Vals=qr2, QCVals = qc, QCVar = qc_var, LogPi=logp_pi, PiEntropy=pi_entropy,
-                       Alpha=alpha, LogAlpha=log_alpha, LossAlpha=alpha_loss)
+                       Alpha=alpha, LogAlpha=log_alpha, LossAlpha=alpha_loss,
+                       # Cost / risk signals (useful for debugging)
+                       QcPi=qc_pi, QcPiVar=qc_pi_var, QcPiCVaR=qc_pi_cvar,
+                       # Policy loss components (means)
+                       PiEntTerm=pi_ent_term, PiQTerm=pi_q_term, PiCostTerm=pi_cost_term)
     if use_costs:
         vars_to_get.update(dict(Beta=beta, LogBeta=log_beta, LossBeta=beta_loss))
 
@@ -671,10 +703,34 @@ def sac(env_fn, actor_fn=mlp_actor, critic_fn=mlp_critic, var_fn=mlp_var, ac_kwa
                 #print(aaa)
                 #print(bbb)
                 if t < local_update_after:
-                    logger.store(**sess.run(vars_to_get, feed_dict))
+                    values = sess.run(vars_to_get, feed_dict)
+                    logger.store(**values)
                 else:
                     values, _ = sess.run([vars_to_get, grouped_update], feed_dict)
                     logger.store(**values)
+
+                # Write training diagnostics (only on root proc) to train_updates.txt.
+                # train_print_freq is in "update blocks" (t % update_freq == 0). Set to 1 for verbose logging.
+                if proc_id() == 0 and train_print_freq is not None and train_print_freq > 0:
+                    update_block = (t // update_freq)
+                    if (j == 0) and (update_block % int(train_print_freq) == 0):
+                        def _mean(x):
+                            try:
+                                return float(np.mean(x))
+                            except Exception:
+                                return float(x)
+
+                        msg = (
+                            f"[train] t={t:6d} | LossPi={_mean(values.get('LossPi')): .4f} "
+                            f"| PiEntropy={_mean(values.get('PiEntropy')): .4f} | Alpha={_mean(values.get('Alpha')): .4f} "
+                            f"| PiEntTerm={_mean(values.get('PiEntTerm')): .4f} | MinQ={_mean(values.get('PiQTerm')): .4f} "
+                            f"| PiCostTerm={_mean(values.get('PiCostTerm')): .4f} "
+                            f"| QcPiCVaR={_mean(values.get('QcPiCVaR')): .4f} | QcPi={_mean(values.get('QcPi')): .4f}"
+                        )
+                        if use_costs:
+                            msg += f" | Beta={_mean(values.get('Beta')): .4f}"
+                        if train_log_f is not None:
+                            train_log_f.write(msg + "\n")
 
         # End of epoch wrap-up
         if t > 0 and t % local_steps_per_epoch == 0:
