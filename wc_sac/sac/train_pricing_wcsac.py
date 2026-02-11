@@ -56,10 +56,10 @@ def main():
     parser.add_argument("--seed", type=int, default=0)
 
     # 泊松率函数参数：f(p)=eta*(1-p**k)**omega, g(p)=thet-thet*(1-p**k)**omega
-    parser.add_argument("--eta", type=float, default=0.4, help="arrival scale eta")
-    parser.add_argument("--thet", type=float, default=0.05, help="leave scale thet")
-    parser.add_argument("--k", type=float, default=1.5, help="exponent k on p")
-    parser.add_argument("--omega", type=float, default=3.0, help="power omega on (1-p**k)")
+    parser.add_argument("--eta", type=float, default=0.33, help="arrival scale eta")
+    parser.add_argument("--thet", type=float, default=0.33, help="leave scale thet")
+    parser.add_argument("--k", type=float, default=2.0, help="exponent k on p")
+    parser.add_argument("--omega", type=float, default=2.4, help="power omega on (1-p**k)")
 
     # 训练超参：保持与原 wcsac.py 一致的命名
     parser.add_argument("--hid", type=int, default=256)
@@ -78,11 +78,11 @@ def main():
     parser.add_argument("--fixed_entropy_bonus", default=None, type=float)
     parser.add_argument("--entropy_constraint", type=float, default=-1)
     parser.add_argument("--fixed_cost_penalty", default=None, type=float)
-    parser.add_argument("--cost_lim", type=float, default=0.5)
-    parser.add_argument("--zeta", type=float, default=0.0, help="tolerance ratio in [0,1): constrain cost CVaR into (cost_lim*(1-zeta), cost_lim)")
-    parser.add_argument("--lr_s", type=int, default=50)
+    parser.add_argument("--cost_lim", type=float, default=8.0)
+    parser.add_argument("--zeta", type=float, default=0.1, help="tolerance ratio in [0,1): constrain cost CVaR into (cost_lim*(1-zeta), cost_lim)")
+    parser.add_argument("--lr_s", type=int, default=0.1)
     parser.add_argument("--damp_s", type=int, default=10)
-    parser.add_argument("--reward_scale", type=float, default=1.0)
+    parser.add_argument("--reward_scale", type=float, default=1e-3)
     args = parser.parse_args()
 
     series = ExcessiveCapacitySeries.from_npz(args.excessive_capacity_npz)

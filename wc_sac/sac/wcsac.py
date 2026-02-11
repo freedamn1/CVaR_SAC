@@ -144,7 +144,7 @@ def get_target_update(main_name, target_name, polyak):
 Policies
 """
 
-LOG_STD_MAX = 2
+LOG_STD_MAX = 1
 LOG_STD_MIN = -20
 
 def mlp_gaussian_policy(x, a, hidden_sizes, activation, output_activation):
@@ -198,6 +198,7 @@ def mlp_actor(x, a, name='pi', hidden_sizes=(64,64), activation=tf.nn.relu,
 
     return mu, pi, logp_pi
 
+# 跟critic_fn的区别是多一个softplus保证方差为正
 def mlp_var(x, a, pi, name, hidden_sizes=(64,64), activation=tf.nn.relu,
               output_activation=None, policy=mlp_gaussian_policy, action_space=None):
     
@@ -725,7 +726,7 @@ def sac(env_fn, actor_fn=mlp_actor, critic_fn=mlp_critic, var_fn=mlp_var, ac_kwa
                             f"| PiEntropy={_mean(values.get('PiEntropy')): .4f} | Alpha={_mean(values.get('Alpha')): .4f} "
                             f"| PiEntTerm={_mean(values.get('PiEntTerm')): .4f} | MinQ={_mean(values.get('PiQTerm')): .4f} "
                             f"| PiCostTerm={_mean(values.get('PiCostTerm')): .4f} "
-                            f"| QcPiCVaR={_mean(values.get('QcPiCVaR')): .4f} | QcPi={_mean(values.get('QcPi')): .4f}"
+                            f"| QcPiCVaR={_mean(values.get('QcPiCVaR')): .4f} | QcPi={_mean(values.get('QcPi')): .4f} | QcPiVar={_mean(values.get('QcPiVar')): .4f}"
                         )
                         if use_costs:
                             msg += f" | Beta={_mean(values.get('Beta')): .4f}"

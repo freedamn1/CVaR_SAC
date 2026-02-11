@@ -8,6 +8,10 @@ import joblib
 import shutil
 import numpy as np
 import tensorflow as tf
+if tf.__version__.startswith('2'):
+    import tensorflow.compat.v1 as tf_v1
+    tf_v1.disable_eager_execution()
+    tf = tf_v1
 import os.path as osp, time, atexit, os
 from wc_sac.utils.mpi_tools import proc_id, mpi_statistics_scalar
 from wc_sac.utils.serialization_utils import convert_json
