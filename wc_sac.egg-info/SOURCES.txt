@@ -12,5 +12,6 @@ wc_sac/envs/preemptive_pricing_env.py
 wc_sac/sac/__init__.py
 wc_sac/sac/baselineCVaR.py
 wc_sac/sac/saclag.py
+wc_sac/sac/test_pricing_wcsac.py
 wc_sac/sac/train_pricing_wcsac.py
 wc_sac/sac/wcsac.py

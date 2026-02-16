@@ -8,7 +8,7 @@
     "actor_fn":	"mlp_actor",
     "alpha_sig_level":	0.5,
     "batch_size":	256,
-    "cost_lim":	8.0,
+    "cost_lim":	3.0,
     "critic_fn":	"mlp_critic",
     "damp_scale":	10,
     "entropy_constraint":	-1,
@@ -21,15 +21,15 @@
     "local_start_steps":	500,
     "local_update_after":	500,
     "logger":	{
-        "<wc_sac.utils.logx.EpochLogger object at 0x7f2d245e5a30>":	{
+        "<wc_sac.utils.logx.EpochLogger object at 0x7f98b977ec40>":	{
             "epoch_dict":	{},
             "exp_name":	"pricing_wcsac",
             "first_row":	true,
             "log_current_row":	{},
             "log_headers":	[],
-            "output_dir":	"/workspace/CVaR_SAC/data/2026-02-10_pricing_wcsac/2026-02-10_15-35-58-pricing_wcsac_s0",
+            "output_dir":	"/workspace/CVaR_SAC/data/2026-02-13_pricing_wcsac/2026-02-13_10-52-30-pricing_wcsac_s0",
             "output_file":	{
-                "<_io.TextIOWrapper name='/workspace/CVaR_SAC/data/2026-02-10_pricing_wcsac/2026-02-10_15-35-58-pricing_wcsac_s0/progress.txt' mode='w' encoding='UTF-8'>":	{
+                "<_io.TextIOWrapper name='/workspace/CVaR_SAC/data/2026-02-13_pricing_wcsac/2026-02-13_10-52-30-pricing_wcsac_s0/progress.txt' mode='w' encoding='UTF-8'>":	{
                     "mode":	"w"
                 }
             }
@@ -37,7 +37,7 @@
     },
     "logger_kwargs":	{
         "exp_name":	"pricing_wcsac",
-        "output_dir":	"/workspace/CVaR_SAC/data/2026-02-10_pricing_wcsac/2026-02-10_15-35-58-pricing_wcsac_s0"
+        "output_dir":	"/workspace/CVaR_SAC/data/2026-02-13_pricing_wcsac/2026-02-13_10-52-30-pricing_wcsac_s0"
     },
     "lr":	0.001,
     "lr_scale":	0.1,
@@ -45,6 +45,7 @@
     "polyak":	0.995,
     "render":	false,
     "replay_size":	1000000,
+    "resume_from":	"data/2026-02-13_pricing_wcsac/2026-02-13_10-05-04-pricing_wcsac_s0",
     "reward_scale":	0.001,
     "save_freq":	10,
     "seed":	0,

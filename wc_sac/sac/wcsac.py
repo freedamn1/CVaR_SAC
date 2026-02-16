@@ -10,6 +10,7 @@ if tf.__version__.startswith('2'):
     tf = tf_v1
 import time
 import atexit
+import os
 import os.path as osp
 from wc_sac.utils.logx import EpochLogger
 from wc_sac.utils.mpi_tf import sync_all_params, MpiAdamOptimizer
@@ -198,7 +199,7 @@ def mlp_actor(x, a, name='pi', hidden_sizes=(64,64), activation=tf.nn.relu,
 
     return mu, pi, logp_pi
 
-# 跟critic_fn的区别是多一个softplus保证方差为正
+# 跟 critic_fn 的区别是多一个 softplus 保证方差为正
 def mlp_var(x, a, pi, name, hidden_sizes=(64,64), activation=tf.nn.relu,
               output_activation=None, policy=mlp_gaussian_policy, action_space=None):
     
@@ -283,6 +284,7 @@ def sac(env_fn, actor_fn=mlp_actor, critic_fn=mlp_critic, var_fn=mlp_var, ac_kwa
         reward_scale=1, lr_scale = 1, damp_scale = 0,
         zeta=0.0,
         train_print_freq=10,
+        resume_from=None,
         ):
     """
 
@@ -429,7 +431,7 @@ def sac(env_fn, actor_fn=mlp_actor, critic_fn=mlp_critic, var_fn=mlp_var, ac_kwa
         qr1, qr1_pi = critic_fn(x_ph, a_ph, pi, name='qr1', **ac_kwargs)
         qr2, qr2_pi = critic_fn(x_ph, a_ph, pi, name='qr2', **ac_kwargs)
         qc,  qc_pi  = critic_fn(x_ph, a_ph, pi, name='qc', **ac_kwargs)
-        qc_var,  qc_pi_var  = var_fn(x_ph, a_ph, pi, name='qc_var', **ac_kwargs)
+        qc_var_pred, qc_pi_var_pred  = var_fn(x_ph, a_ph, pi, name='qc_var', **ac_kwargs)
 
     with tf.variable_scope('main', reuse=True):
         # Additional policy output from a different observation placeholder
@@ -442,7 +444,7 @@ def sac(env_fn, actor_fn=mlp_actor, critic_fn=mlp_critic, var_fn=mlp_var, ac_kwa
         _, qr1_pi_targ = critic_fn(x2_ph, a_ph, pi2, name='qr1', **ac_kwargs)
         _, qr2_pi_targ = critic_fn(x2_ph, a_ph, pi2, name='qr2', **ac_kwargs)
         _, qc_pi_targ  = critic_fn(x2_ph, a_ph, pi2, name='qc', **ac_kwargs)
-        _, qc_pi_var_targ = var_fn(x2_ph, a_ph, pi2, name='qc_var', **ac_kwargs)
+        _, qc_pi_var_pred_targ = var_fn(x2_ph, a_ph, pi2, name='qc_var', **ac_kwargs)
 
     # Entropy bonus
     if fixed_entropy_bonus is None:
@@ -487,21 +489,27 @@ def sac(env_fn, actor_fn=mlp_actor, critic_fn=mlp_critic, var_fn=mlp_var, ac_kwa
     min_q_pi_targ = tf.minimum(qr1_pi_targ, qr2_pi_targ)
     
     
-    qc_var = tf.clip_by_value(qc_var, 1e-8, 1e8)
-    qc_pi_var = tf.clip_by_value(qc_pi_var, 1e-8, 1e8)
-    qc_pi_var_targ = tf.clip_by_value(qc_pi_var_targ, 1e-8, 1e8)
+    qc_pos = tf.nn.softplus(qc)
+    qc_pi_pos = tf.nn.softplus(qc_pi)
+    qc_pi_targ_pos = tf.nn.softplus(qc_pi_targ)
+
+    qc_var = tf.clip_by_value(qc_var_pred, 1e-8, 1e8)
+    qc_pi_var = tf.clip_by_value(qc_pi_var_pred, 1e-8, 1e8)
+    qc_pi_var_targ = tf.clip_by_value(qc_pi_var_pred_targ, 1e-8, 1e8)
 
     # Targets for Q and (cost mean/var) regression
     q_backup = tf.stop_gradient(r_ph + gamma*(1-d_ph)*(min_q_pi_targ - alpha * logp_pi2))
     # 目标长期成本均值（Bellman）：E[G_c,t] = c_t + gamma * E_{a'~pi}[ E[G_c,t+1 | s', a'] ]
     # 这里用单样本 a'=pi2 近似期望（与 SAC 常见实现一致）。
-    qc_backup = tf.stop_gradient(c_ph + gamma*(1-d_ph)*qc_pi_targ)
-    # 目标长期成本方差：Var[G_c,t] = gamma^2 * E_{a'~pi}[ Var[G_c,t+1 | s', a'] ]
-    qc_var_backup = tf.stop_gradient((gamma**2) * (1-d_ph) * qc_pi_var_targ)
-    qc_var_backup = tf.clip_by_value(qc_var_backup, 0.0, 1e8)
+    qc_backup = tf.stop_gradient(c_ph + gamma*(1-d_ph)*qc_pi_targ_pos)
+    td_err_c = c_ph + gamma * (1 - d_ph) * qc_pi_targ_pos - tf.stop_gradient(qc_pos)
+    qc_var_backup = tf.stop_gradient(
+        tf.square(td_err_c) + (gamma**2) * (1 - d_ph) * qc_pi_var_targ
+    )
+    qc_var_backup = tf.maximum(tf.clip_by_value(qc_var_backup, 0.0, 1e8), 1e-8)
 
     # CVaR（使用显著性水平 alpha_sig_level）
-    qc_pi_cvar = cvar_from_mean_var(qc_pi, qc_pi_var, alpha_sig_level)
+    qc_pi_cvar = cvar_from_mean_var(qc_pi_pos, qc_pi_var, alpha_sig_level)
 
     # Soft actor-critic losses
 
@@ -516,7 +524,9 @@ def sac(env_fn, actor_fn=mlp_actor, critic_fn=mlp_critic, var_fn=mlp_var, ac_kwa
     qr1_loss = 0.5 * tf.reduce_mean((q_backup - qr1)**2)
     qr2_loss = 0.5 * tf.reduce_mean((q_backup - qr2)**2)
     qc_loss =  0.5 * tf.reduce_mean((qc_backup - qc)**2)
-    qc_var_loss = 0.5 * tf.reduce_mean(qc_var + qc_var_backup - 2 * ((qc_var * qc_var_backup) ** 0.5))
+    qc_var_loss = 0.5 * tf.reduce_mean(
+        qc_var + qc_var_backup - 2.0 * tf.sqrt(qc_var * qc_var_backup)
+    )
     q_loss = qr1_loss + qr2_loss + qc_loss + qc_var_loss
 
     # Loss for alpha
@@ -588,16 +598,68 @@ def sac(env_fn, actor_fn=mlp_actor, critic_fn=mlp_critic, var_fn=mlp_var, ac_kwa
     # As a shortcut, use our exponential moving average update w/ coefficient zero
     target_init = get_target_update('main', 'target', 0.0)
 
+    saver = tf.train.Saver(max_to_keep=5)
+
     sess = tf.Session()
     sess.run(tf.global_variables_initializer())
     sess.run(target_init)
+
+    def _resolve_latest_simple_save_suffix(fpath):
+        candidates = []
+        for name in os.listdir(fpath):
+            if not name.startswith("simple_save"):
+                continue
+            suffix = name[len("simple_save") :]
+            if suffix == "":
+                candidates.append("")
+                continue
+            try:
+                candidates.append(str(int(suffix)))
+            except Exception:
+                continue
+        numeric = [c for c in candidates if c != ""]
+        if numeric:
+            return str(max(int(x) for x in numeric))
+        return "" if "" in candidates else None
+
+    if resume_from is not None and str(resume_from).strip() != "":
+        resume_from = osp.abspath(str(resume_from))
+        ckpt_path = None
+
+        ckpt_dir = osp.join(resume_from, "checkpoints")
+        if osp.isdir(ckpt_dir):
+            try:
+                ckpt_path = tf.train.latest_checkpoint(ckpt_dir)
+            except Exception:
+                ckpt_path = None
+
+        if ckpt_path is None:
+            suffix = _resolve_latest_simple_save_suffix(resume_from)
+            if suffix is not None:
+                simple_save_dir = osp.join(resume_from, "simple_save" + suffix)
+                variables_prefix = osp.join(simple_save_dir, "variables", "variables")
+                if osp.exists(variables_prefix + ".index"):
+                    ckpt_path = variables_prefix
+
+        if ckpt_path is not None:
+            if proc_id() == 0:
+                print(f"[resume] restoring from: {ckpt_path}")
+                saver.restore(sess, ckpt_path)
+        else:
+            if proc_id() == 0:
+                print(f"[resume] no checkpoint found under: {resume_from}")
 
     # Sync params across processes
     sess.run(sync_all_params())
 
     # Setup model saving
     logger.setup_tf_saver(sess, inputs={'x': x_ph, 'a': a_ph},
-                                outputs={'mu': mu, 'pi': pi, 'qr1': qr1, 'qr2': qr2, 'qc': qc})
+                                outputs={'mu': mu, 'pi': pi, 'qr1': qr1, 'qr2': qr2, 'qc': qc_pos})
+
+    checkpoint_dir = None
+    if proc_id() == 0:
+        checkpoint_dir = osp.join(logger.output_dir, "checkpoints")
+        os.makedirs(checkpoint_dir, exist_ok=True)
 
     def get_action(o, deterministic=False):
         act_op = mu if deterministic else pi
@@ -622,13 +684,29 @@ def sac(env_fn, actor_fn=mlp_actor, critic_fn=mlp_critic, var_fn=mlp_var, ac_kwa
     total_steps = steps_per_epoch * epochs
 
     # variables to measure in an update
-    vars_to_get = dict(LossPi=pi_loss, LossQR1=qr1_loss, LossQR2=qr2_loss, LossQC=qc_loss, LossQCVar=qc_var_loss,
-                       QR1Vals=qr1, QR2Vals=qr2, QCVals = qc, QCVar = qc_var, LogPi=logp_pi, PiEntropy=pi_entropy,
-                       Alpha=alpha, LogAlpha=log_alpha, LossAlpha=alpha_loss,
-                       # Cost / risk signals (useful for debugging)
-                       QcPi=qc_pi, QcPiVar=qc_pi_var, QcPiCVaR=qc_pi_cvar,
-                       # Policy loss components (means)
-                       PiEntTerm=pi_ent_term, PiQTerm=pi_q_term, PiCostTerm=pi_cost_term)
+    vars_to_get = dict(
+        LossPi=pi_loss,
+        LossQR1=qr1_loss,
+        LossQR2=qr2_loss,
+        LossQC=qc_loss,
+        LossQCVar=qc_var_loss,
+        QR1Vals=qr1,
+        QR2Vals=qr2,
+        QCVals=qc_pos,
+        QCVar=qc_var,
+        LogPi=logp_pi,
+        PiEntropy=pi_entropy,
+        Alpha=alpha,
+        LogAlpha=log_alpha,
+        LossAlpha=alpha_loss,
+        QcPi=qc_pi_pos,
+        QcPiRaw=qc_pi,
+        QcPiVar=qc_pi_var,
+        QcPiCVaR=qc_pi_cvar,
+        PiEntTerm=pi_ent_term,
+        PiQTerm=pi_q_term,
+        PiCostTerm=pi_cost_term,
+    )
     if use_costs:
         vars_to_get.update(dict(Beta=beta, LogBeta=log_beta, LossBeta=beta_loss))
 
@@ -699,10 +777,7 @@ def sac(env_fn, actor_fn=mlp_actor, critic_fn=mlp_critic, var_fn=mlp_var, ac_kwa
                              c_ph: batch['costs'],
                              d_ph: batch['done'],
                             }
-                #aaa = sess.run(logp_pi, feed_dict)
-                #bbb = sess.run(pi_entropy, feed_dict)
-                #print(aaa)
-                #print(bbb)
+
                 if t < local_update_after:
                     values = sess.run(vars_to_get, feed_dict)
                     logger.store(**values)
@@ -721,12 +796,22 @@ def sac(env_fn, actor_fn=mlp_actor, critic_fn=mlp_critic, var_fn=mlp_var, ac_kwa
                             except Exception:
                                 return float(x)
 
+                        batch_costs = np.asarray(batch.get('costs', []), dtype=np.float64).reshape(-1)
+                        if batch_costs.size > 0:
+                            batch_cost_mean = float(np.mean(batch_costs))
+                            batch_cost_max = float(np.max(batch_costs))
+                            batch_cost_nz = float(np.mean(batch_costs > 0.0))
+                        else:
+                            batch_cost_mean = 0.0
+                            batch_cost_max = 0.0
+                            batch_cost_nz = 0.0
+
                         msg = (
                             f"[train] t={t:6d} | LossPi={_mean(values.get('LossPi')): .4f} "
                             f"| PiEntropy={_mean(values.get('PiEntropy')): .4f} | Alpha={_mean(values.get('Alpha')): .4f} "
-                            f"| PiEntTerm={_mean(values.get('PiEntTerm')): .4f} | MinQ={_mean(values.get('PiQTerm')): .4f} "
-                            f"| PiCostTerm={_mean(values.get('PiCostTerm')): .4f} "
+                            f"| MinQ={_mean(values.get('PiQTerm')): .4f} "
                             f"| QcPiCVaR={_mean(values.get('QcPiCVaR')): .4f} | QcPi={_mean(values.get('QcPi')): .4f} | QcPiVar={_mean(values.get('QcPiVar')): .4f}"
+                            f"| BatchCostMean={batch_cost_mean: .4f} | BatchCostMax={batch_cost_max: .4f} | BatchCostNZ={batch_cost_nz: .4f}"
                         )
                         if use_costs:
                             msg += f" | Beta={_mean(values.get('Beta')): .4f}"
@@ -749,6 +834,8 @@ def sac(env_fn, actor_fn=mlp_actor, critic_fn=mlp_critic, var_fn=mlp_var, ac_kwa
             # Save model
             if (epoch % save_freq == 0) or (epoch == epochs-1):
                 logger.save_state({'env': env}, number_model)
+                if proc_id() == 0 and checkpoint_dir is not None:
+                    saver.save(sess, osp.join(checkpoint_dir, "model"), global_step=number_model)
                 number_model += 1
 
             # Test the performance of the deterministic version of the agent.

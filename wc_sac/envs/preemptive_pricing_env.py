@@ -110,7 +110,9 @@ class PreemptivePricingEnv(gym.Env):
 
         self._rng = np.random.RandomState(cfg.seed)
         self._t = 0
+        self._t0 = 0
         self._n = float(cfg.n0)
+        self._use_horizon_done = True
         # 离散价格档位：默认 0.1, 0.2, ..., 1.0；并按 p_min/p_max 过滤可用档位
         base_levels = np.round(np.arange(0.1, 1.01, 0.1), 2).astype(np.float32)
         p_min = float(self.cfg.p_min)
@@ -143,8 +145,26 @@ class PreemptivePricingEnv(gym.Env):
         return float(np.clip(p_disc, float(self.cfg.p_min), float(self.cfg.p_max)))
 
     def reset(self):
+        series_len = len(self.series)
+        horizon = int(self.cfg.horizon)
+        if horizon <= 0:
+            raise ValueError(f"horizon 必须为正整数，当前为 {horizon}.")
+
+        max_start = max(series_len - 1 - horizon, 0)
+        start_t = int(self._rng.randint(0, max_start + 1)) if max_start > 0 else 0
+
+        self._t0 = start_t
+        self._t = start_t
+        self._n = float(self.cfg.n0)
+        self._use_horizon_done = True
+        c0 = self.series.at(self._t)
+        return np.array([c0, self._n], dtype=np.float32)
+
+    def reset_for_test(self):
+        self._t0 = 0
         self._t = 0
         self._n = float(self.cfg.n0)
+        self._use_horizon_done = False
         c0 = self.series.at(self._t)
         return np.array([c0, self._n], dtype=np.float32)
 
@@ -172,7 +192,10 @@ class PreemptivePricingEnv(gym.Env):
         self._t += 1
         self._n = n_next
 
-        done = bool(self._t >= self.cfg.horizon or self._t >= (len(self.series) - 1))
+        done_by_horizon = False
+        if self._use_horizon_done:
+            done_by_horizon = bool((self._t - self._t0) >= int(self.cfg.horizon))
+        done = bool(done_by_horizon or self._t >= (len(self.series) - 1))
         c_next = self.series.at(self._t)
         obs = np.array([c_next, self._n], dtype=np.float32)
 

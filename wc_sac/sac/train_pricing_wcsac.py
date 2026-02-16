@@ -47,7 +47,7 @@ def make_poisson_rates(eta: float, thet: float, k: float, omega: float):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--excessive_capacity_npz", type=str, default="wc_sac/dataset/excessive_capacity_cpu_300sec.npz")
+    parser.add_argument("--excessive_capacity_npz", type=str, default="wc_sac/dataset/excessive_capacity_cpu.npz")
     parser.add_argument("--p_min", type=float, default=0.01)
     parser.add_argument("--p_max", type=float, default=1.0)
     parser.add_argument("--dt", type=float, default=300.0)
@@ -78,11 +78,17 @@ def main():
     parser.add_argument("--fixed_entropy_bonus", default=None, type=float)
     parser.add_argument("--entropy_constraint", type=float, default=-1)
     parser.add_argument("--fixed_cost_penalty", default=None, type=float)
-    parser.add_argument("--cost_lim", type=float, default=8.0)
+    parser.add_argument("--cost_lim", type=float, default=3.0)
     parser.add_argument("--zeta", type=float, default=0.1, help="tolerance ratio in [0,1): constrain cost CVaR into (cost_lim*(1-zeta), cost_lim)")
     parser.add_argument("--lr_s", type=int, default=0.1)
     parser.add_argument("--damp_s", type=int, default=10)
     parser.add_argument("--reward_scale", type=float, default=1e-3)
+    parser.add_argument(
+        "--resume_from",
+        type=str,
+        default=None,
+        help="从指定训练目录恢复参数继续训练（目录内含 checkpoints/ 或 simple_save*）",
+    )
     args = parser.parse_args()
 
     series = ExcessiveCapacitySeries.from_npz(args.excessive_capacity_npz)
@@ -125,6 +131,7 @@ def main():
         reward_scale=args.reward_scale,
         max_ep_len=args.horizon,
         logger_kwargs=logger_kwargs,
+        resume_from=args.resume_from,
     )
 
 
