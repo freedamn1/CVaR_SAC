@@ -1,0 +1,54 @@
+{
+    "ac_kwargs":	{
+        "hidden_sizes":	[
+            256,
+            256
+        ]
+    },
+    "actor_fn":	"mlp_actor",
+    "batch_size":	256,
+    "cost_lim":	6.0,
+    "critic_fn":	"mlp_critic",
+    "entropy_constraint":	-1,
+    "env_fn":	"env_fn",
+    "epochs":	100,
+    "exp_name":	"saclag",
+    "fixed_cost_penalty":	null,
+    "fixed_entropy_bonus":	null,
+    "gamma":	0.99,
+    "local_start_steps":	500,
+    "local_update_after":	500,
+    "logger":	{
+        "<wc_sac.utils.logx.EpochLogger object at 0x7f3ae51921c0>":	{
+            "epoch_dict":	{},
+            "exp_name":	"saclag",
+            "first_row":	true,
+            "log_current_row":	{},
+            "log_headers":	[],
+            "output_dir":	"/workspace/CVaR_SAC/data/2026-02-20_saclag/2026-02-20_02-30-27-saclag_s0",
+            "output_file":	{
+                "<_io.TextIOWrapper name='/workspace/CVaR_SAC/data/2026-02-20_saclag/2026-02-20_02-30-27-saclag_s0/progress.txt' mode='w' encoding='UTF-8'>":	{
+                    "mode":	"w"
+                }
+            }
+        }
+    },
+    "logger_kwargs":	{
+        "exp_name":	"saclag",
+        "output_dir":	"/workspace/CVaR_SAC/data/2026-02-20_saclag/2026-02-20_02-30-27-saclag_s0"
+    },
+    "lr":	0.001,
+    "lr_scale":	0.1,
+    "max_ep_len":	288,
+    "polyak":	0.995,
+    "render":	false,
+    "replay_size":	1000000,
+    "resume_from":	null,
+    "reward_scale":	0.001,
+    "save_freq":	10,
+    "seed":	0,
+    "steps_per_epoch":	30000,
+    "train_print_freq":	10,
+    "update_freq":	100,
+    "use_costs":	true
+}

@@ -2,24 +2,28 @@
 baselineCVaR.py
 
 用途：
-- 在动态定价环境（Poisson 到达/离开采样）中评估一个固定价格基线策略的成本分布；
-- 通过采样多条 episode 估计上尾 CVaR（以及均值/分位数等统计量）；
-- 可选导出单条 episode 的“即时成本 & 过剩容量”随时间步变化曲线（双 y 轴）。
+- 模拟静态定价策略（默认价格 0.5），生成与 train_pricing_wcsac 类似的 train_updates.txt 日志文件。
+- 该日志文件包含 WinRewMean, WinCostMean 等字段，供 plot_results.py 绘图使用。
+- 不再生成单独的图片，而是通过长时间运行模拟生成训练曲线数据。
 
 运行示例：
-python -m wc_sac.sac.baselineCVaR --price 0.5 --episodes 1000 --plot_out_png baseline_cost_capacity.png
+python -m wc_sac.sac.baselineCVaR --price 0.5 --cpu 1 --epochs 100
 """
 
 from __future__ import annotations
 
 import argparse
-from dataclasses import dataclass
-from pathlib import Path
-from typing import Callable, Dict, List, Optional, Tuple
-
+import time
+import os
 import numpy as np
 
-from wc_sac.envs.preemptive_pricing_env import ExcessiveCapacitySeries, PreemptivePricingEnv, PricingEnvConfig
+from wc_sac.envs.preemptive_pricing_env import (
+    PreemptivePricingEnv,
+    PricingEnvConfig,
+    ExcessiveCapacitySeries,
+)
+from wc_sac.utils.run_utils import setup_logger_kwargs
+from wc_sac.utils.mpi_tools import mpi_fork, proc_id, num_procs
 
 
 def make_poisson_rates(eta: float, thet: float, k: float, omega: float):
@@ -40,523 +44,189 @@ def make_poisson_rates(eta: float, thet: float, k: float, omega: float):
     return f, g
 
 
-@dataclass(frozen=True)
-class BaselineResult:
-    gamma: float
-    alpha_tail: float
-    price: float
-    episodes: int
-    discounted_costs: np.ndarray
-    undiscounted_costs: np.ndarray
-    trace_costs: Optional[np.ndarray]
-    trace_excessive_capacity: Optional[np.ndarray]
-
-
-@dataclass(frozen=True)
-class EpisodeStats:
-    discounted_cost: float
-    undiscounted_cost: float
-    total_reward: float
-    count_cost_gt_0: int
-    count_cost_gt_0_1: int
-    count_cost_gt_0_2: int
-    count_cost_gt_0_3: int
-    count_cost_gt_0_4: int
-    count_cost_gt_0_5: int
-
-
-def _price_to_action_norm(price: float, p_min: float, p_max: float) -> float:
-    p_min = float(p_min)
-    p_max = float(p_max)
-    if p_max <= p_min:
-        raise ValueError(f"Invalid price range: p_min={p_min}, p_max={p_max}")
-    p = float(np.clip(float(price), p_min, p_max))
-    a = 2.0 * (p - p_min) / (p_max - p_min) - 1.0
-    return float(np.clip(a, -1.0, 1.0))
-
-
-def _rollout_episode_stats(
-    env: PreemptivePricingEnv,
-    fixed_price: float,
-    gamma: float,
-) -> EpisodeStats:
-    obs = env.reset()
-    _ = obs
-    discounted_cost = 0.0
-    undiscounted_cost = 0.0
-    total_reward = 0.0
-    disc = 1.0
-    done = False
-    t = 0
-
-    count_cost_gt_0 = 0
-    count_cost_gt_0_1 = 0
-    count_cost_gt_0_2 = 0
-    count_cost_gt_0_3 = 0
-    count_cost_gt_0_4 = 0
-    count_cost_gt_0_5 = 0
-
-    a_norm = _price_to_action_norm(
-        price=float(fixed_price), p_min=float(env.cfg.p_min), p_max=float(env.cfg.p_max)
-    )
-    while not done:
-        action = np.array([a_norm], dtype=np.float32)
-        obs, r, done, info = env.step(action)
-        _ = (obs, info)
-        c = float(info.get("cost", 0.0))
-
-        total_reward += float(r)
-        undiscounted_cost += c
-        discounted_cost += disc * c
-        disc *= float(gamma)
-
-        if c > 0.0:
-            count_cost_gt_0 += 1
-        if c > 0.1:
-            count_cost_gt_0_1 += 1
-        if c > 0.2:
-            count_cost_gt_0_2 += 1
-        if c > 0.3:
-            count_cost_gt_0_3 += 1
-        if c > 0.4:
-            count_cost_gt_0_4 += 1
-        if c > 0.5:
-            count_cost_gt_0_5 += 1
-
-        t += 1
-        if t > 10_000:
-            raise RuntimeError("Episode did not terminate within 10000 steps.")
-
-    return EpisodeStats(
-        discounted_cost=float(discounted_cost),
-        undiscounted_cost=float(undiscounted_cost),
-        total_reward=float(total_reward),
-        count_cost_gt_0=int(count_cost_gt_0),
-        count_cost_gt_0_1=int(count_cost_gt_0_1),
-        count_cost_gt_0_2=int(count_cost_gt_0_2),
-        count_cost_gt_0_3=int(count_cost_gt_0_3),
-        count_cost_gt_0_4=int(count_cost_gt_0_4),
-        count_cost_gt_0_5=int(count_cost_gt_0_5),
-    )
-
-
-def _rollout_one_episode(
-    env: PreemptivePricingEnv,
-    fixed_price: float,
-    gamma: float,
-) -> Tuple[float, float]:
-    obs = env.reset()
-    _ = obs
-    discounted = 0.0
-    undiscounted = 0.0
-    disc = 1.0
-    done = False
-    t = 0
-    a_norm = _price_to_action_norm(
-        price=float(fixed_price), p_min=float(env.cfg.p_min), p_max=float(env.cfg.p_max)
-    )
-    while not done:
-        action = np.array([a_norm], dtype=np.float32)
-        obs, r, done, info = env.step(action)
-        _ = (obs, r)
-        c = float(info.get("cost", 0.0))
-        undiscounted += c
-        discounted += disc * c
-        disc *= float(gamma)
-        t += 1
-        if t > 10_000:
-            raise RuntimeError("Episode did not terminate within 10000 steps.")
-    return discounted, undiscounted
-
-
-def _rollout_one_episode_with_trace(
-    env: PreemptivePricingEnv,
-    fixed_price: float,
-    gamma: float,
-) -> Tuple[float, float, np.ndarray, np.ndarray]:
-    obs = env.reset()
-    _ = obs
-    discounted = 0.0
-    undiscounted = 0.0
-    disc = 1.0
-    done = False
-    t = 0
-    costs: List[float] = []
-    capacities: List[float] = []
-    a_norm = _price_to_action_norm(
-        price=float(fixed_price), p_min=float(env.cfg.p_min), p_max=float(env.cfg.p_max)
-    )
-    while not done:
-        action = np.array([a_norm], dtype=np.float32)
-        obs, r, done, info = env.step(action)
-        _ = (obs, r)
-        c = float(info.get("cost", 0.0))
-        cap = float(info.get("excessive_capacity", 0.0))
-        costs.append(c)
-        capacities.append(cap)
-        undiscounted += c
-        discounted += disc * c
-        disc *= float(gamma)
-        t += 1
-        if t > 10_000:
-            raise RuntimeError("Episode did not terminate within 10000 steps.")
-    return (
-        discounted,
-        undiscounted,
-        np.asarray(costs, dtype=np.float64),
-        np.asarray(capacities, dtype=np.float64),
-    )
-
-
-def _cvar_upper_tail(x: np.ndarray, alpha_tail: float) -> float:
-    x = np.asarray(x, dtype=np.float64).reshape(-1)
-    if x.size == 0:
-        raise ValueError("Empty array for CVaR.")
-    if not (0.0 < float(alpha_tail) <= 1.0):
-        raise ValueError(f"alpha_tail must be in (0,1], got {alpha_tail}.")
-    k = int(np.ceil(float(alpha_tail) * x.size))
-    k = max(1, min(k, x.size))
-    x_sorted = np.sort(x)
-    tail = x_sorted[-k:]
-    return float(np.mean(tail))
-
-
-def run_baseline_cvar(
-    excessive_capacity_npz: str | Path,
-    p_min: float,
-    p_max: float,
-    dt: float,
-    horizon: int,
-    n0: float,
-    eta: float,
-    thet: float,
-    k: float,
-    omega: float,
-    fixed_price: float = 0.5,
-    episodes: int = 1000,
-    gamma: float = 0.99,
-    alpha_tail: float = 0.1,
+def run_static_baseline(
+    env_fn,
+    price: float = 0.5,
     seed: int = 0,
-    trace_episode: int = 0,
-) -> BaselineResult:
-    path = Path(excessive_capacity_npz)
-    data = np.load(str(path), allow_pickle=True)
-    if "excessive_capacity_cpu" not in data:
-        raise KeyError("NPZ file must contain 'excessive_capacity_cpu' key.")
-    raw_capacity = np.asarray(data["excessive_capacity_cpu"], dtype=np.float32).reshape(-1)
-    if raw_capacity.size < 2:
-        raise ValueError("excessive_capacity_cpu length must be >= 2.")
-
-    fixed_price = float(np.clip(fixed_price, float(p_min), float(p_max)))
-    f, g = make_poisson_rates(float(eta), float(thet), float(k), float(omega))
-
-    discounted_costs: List[float] = []
-    undiscounted_costs: List[float] = []
-    trace_costs: Optional[np.ndarray] = None
-    trace_excessive_capacity: Optional[np.ndarray] = None
-    for ep in range(int(episodes)):
-        series = ExcessiveCapacitySeries(raw_capacity.copy())
-        cfg = PricingEnvConfig(
-            p_min=float(p_min),
-            p_max=float(p_max),
-            dt=float(dt),
-            horizon=int(horizon),
-            n0=float(n0),
-            seed=int(seed) + int(ep),
-        )
-        env = PreemptivePricingEnv(series, cfg, f_arrival_rate=f, g_departure_rate=g)
-        if int(ep) == int(trace_episode):
-            disc_c, undis_c, c_seq, cap_seq = _rollout_one_episode_with_trace(
-                env, fixed_price=fixed_price, gamma=float(gamma)
-            )
-            trace_costs = c_seq
-            trace_excessive_capacity = cap_seq
-        else:
-            disc_c, undis_c = _rollout_one_episode(env, fixed_price=fixed_price, gamma=float(gamma))
-        discounted_costs.append(disc_c)
-        undiscounted_costs.append(undis_c)
-
-    return BaselineResult(
-        gamma=float(gamma),
-        alpha_tail=float(alpha_tail),
-        price=float(fixed_price),
-        episodes=int(episodes),
-        discounted_costs=np.asarray(discounted_costs, dtype=np.float64),
-        undiscounted_costs=np.asarray(undiscounted_costs, dtype=np.float64),
-        trace_costs=trace_costs,
-        trace_excessive_capacity=trace_excessive_capacity,
-    )
-
-
-def _summarize(x: np.ndarray, alpha_tail: float) -> Dict[str, float]:
-    x = np.asarray(x, dtype=np.float64).reshape(-1)
-    return {
-        "mean": float(np.mean(x)),
-        "std": float(np.std(x)),
-        "min": float(np.min(x)),
-        "p50": float(np.quantile(x, 0.50)),
-        "p90": float(np.quantile(x, 0.90)),
-        "p95": float(np.quantile(x, 0.95)),
-        "p99": float(np.quantile(x, 0.99)),
-        "max": float(np.max(x)),
-        "cvar_upper_tail": float(_cvar_upper_tail(x, alpha_tail=float(alpha_tail))),
-    }
-
-
-def _plot_cost_and_capacity(
-    costs: np.ndarray,
-    excessive_capacity: np.ndarray,
-    out_png: str | Path,
-    title: str,
+    steps_per_epoch: int = 1000,
+    epochs: int = 100,
+    update_freq: int = 100,
+    logger_kwargs: dict = dict(),
+    reward_scale: float = 1.0,
+    train_print_freq: int = 10, # 每隔多少个 update_freq 打印一次日志
 ):
-    try:
-        import matplotlib.pyplot as plt
-    except Exception as e:
-        raise ImportError("缺少 matplotlib：请先 pip install matplotlib") from e
+    """
+    模拟静态定价过程，并生成 train_updates.txt
+    """
+    # Setup logging
+    output_dir = logger_kwargs.get('output_dir')
+    train_log_f = None
+    if proc_id() == 0:
+        if not os.path.exists(output_dir):
+            os.makedirs(output_dir)
+        train_log_f = open(os.path.join(output_dir, 'train_updates.txt'), 'w', encoding='utf-8')
+        print(f"Logging to {os.path.join(output_dir, 'train_updates.txt')}")
 
-    costs = np.asarray(costs, dtype=np.float64).reshape(-1)
-    excessive_capacity = np.asarray(excessive_capacity, dtype=np.float64).reshape(-1)
-    if costs.size == 0 or excessive_capacity.size == 0:
-        raise ValueError("Empty trace for plotting.")
-    if costs.size != excessive_capacity.size:
-        raise ValueError(
-            f"Trace length mismatch: costs={costs.size}, excessive_capacity={excessive_capacity.size}"
-        )
+    # Seed
+    seed += 10000 * proc_id()
+    np.random.seed(seed)
 
-    steps = np.arange(costs.size, dtype=np.int32)
-    fig, ax1 = plt.subplots(figsize=(12, 4))
-    ax1.plot(steps, costs, linewidth=1.0, color="#d62728")
-    ax1.set_xlabel("time step")
-    ax1.set_ylabel("instant_cost (preemption rate)", color="#d62728")
-    ax1.tick_params(axis="y", labelcolor="#d62728")
+    env = env_fn()
+    
+    # Calculate normalized action for the fixed price
+    p_min = env.cfg.p_min
+    p_max = env.cfg.p_max
+    
+    def price_to_action(p):
+        p = np.clip(p, p_min, p_max)
+        return 2.0 * (p - p_min) / (p_max - p_min) - 1.0
 
-    ax2 = ax1.twinx()
-    ax2.plot(steps, excessive_capacity, linewidth=1.0, color="#1f77b4", alpha=0.8)
-    ax2.set_ylabel("excessive_capacity", color="#1f77b4")
-    ax2.tick_params(axis="y", labelcolor="#1f77b4")
+    fixed_action = np.array([price_to_action(price)], dtype=np.float32)
+    
+    # Buffers for window-averaged statistics
+    current_window_raw_rews = []
+    current_window_costs = []
+    
+    o, r, d, ep_ret, ep_cost, ep_len = env.reset(), 0, False, 0, 0, 0
+    total_steps = steps_per_epoch * epochs
+    
+    start_time = time.time()
+    
+    # Main loop
+    for t in range(total_steps):
+        
+        a = fixed_action
+        o2, r, d, info = env.step(a)
+        
+        c = info.get('cost', 0.0)
+        
+        # Track for window logging
+        current_window_raw_rews.append(r)
+        current_window_costs.append(c)
+        
+        r *= reward_scale
+        ep_ret += r
+        ep_cost += c
+        ep_len += 1
+        
+        o = o2
+        
+        # Handle done
+        if d or (ep_len == env.cfg.horizon):
+             o, r, d, ep_ret, ep_cost, ep_len = env.reset(), 0, False, 0, 0, 0
+        
+        # Logging logic matching wcsac.py
+        # Log every update_freq steps (simulating the training update frequency)
+        if (t + 1) % update_freq == 0:
+            
+            # Only root process writes to file
+            if proc_id() == 0:
+                # Check if we should print (train_print_freq)
+                update_block = (t // update_freq)
+                if update_block % train_print_freq == 0:
+                    
+                    # Calculate window means
+                    if current_window_raw_rews:
+                        win_rew_mean = float(np.mean(current_window_raw_rews))
+                    else:
+                        win_rew_mean = 0.0
+                        
+                    if current_window_costs:
+                        win_cost_mean = float(np.mean(current_window_costs))
+                        win_cost_max = float(np.max(current_window_costs))
+                        win_cost_nz = float(np.mean(np.array(current_window_costs) > 0.0))
+                    else:
+                        win_cost_mean = 0.0
+                        win_cost_max = 0.0
+                        win_cost_nz = 0.0
+                    
+                    # Reset window buffers
+                    current_window_raw_rews = []
+                    current_window_costs = []
+                    
+                    # Construct message matching wcsac.py format
+                    # Filling missing fields with 0.0 or appropriate defaults
+                    # [train] t=... | LossPi=... ... | WinRewMean=... | WinCostMean=...
+                    
+                    # Note: For static policy, QcPi (Expected Cost) is essentially WinCostMean
+                    qc_pi_val = win_cost_mean 
+                    
+                    msg = (
+                        f"[train] t={t+1:6d} | LossPi=0.0000 "
+                        f"| PiEntropy=0.0000 | Alpha=0.0000 "
+                        f"| MinQ=0.0000 "
+                        f"| QcPiCVaR={qc_pi_val: .4f} | QcPi={qc_pi_val: .4f} | QcPiVar=0.0000"
+                        f"| BatchCostMean={win_cost_mean: .4f} | BatchCostMax={win_cost_max: .4f} | BatchCostNZ={win_cost_nz: .4f}"
+                        f"| WinRewMean={win_rew_mean: .4f} | WinCostMean={win_cost_mean: .4f}"
+                    )
+                    
+                    train_log_f.write(msg + "\n")
+                    train_log_f.flush()
 
-    ax1.grid(True, alpha=0.25)
-    fig.suptitle(title)
-    fig.tight_layout()
+    if proc_id() == 0:
+        if train_log_f:
+            train_log_f.close()
+        print(f"Finished. Logs saved to {output_dir}")
 
-    out_png = Path(out_png)
-    out_png.parent.mkdir(parents=True, exist_ok=True)
-    fig.savefig(str(out_png), dpi=160)
-    plt.close(fig)
-
-
-def baseline_log_output(
-    *,
-    excessive_capacity_npz: str | Path,
-    out_path: str | Path,
-    p_min: float,
-    p_max: float,
-    dt: float,
-    horizon: int,
-    n0: float,
-    eta: float,
-    thet: float,
-    k: float,
-    omega: float,
-    episodes: int,
-    gamma: float,
-    alpha_tail: float,
-    seed: int,
-) -> Path:
-    path = Path(excessive_capacity_npz)
-    data = np.load(str(path), allow_pickle=True)
-    if "excessive_capacity_cpu" not in data:
-        raise KeyError("NPZ file must contain 'excessive_capacity_cpu' key.")
-    raw_capacity = np.asarray(data["excessive_capacity_cpu"], dtype=np.float32).reshape(-1)
-    if raw_capacity.size < 2:
-        raise ValueError("excessive_capacity_cpu length must be >= 2.")
-
-    out_path = Path(out_path)
-    out_path.parent.mkdir(parents=True, exist_ok=True)
-
-    f, g = make_poisson_rates(float(eta), float(thet), float(k), float(omega))
-    price_grid = np.round(np.arange(0.1, 1.01, 0.1), 2).tolist()
-
-    dataset_steps = int(raw_capacity.size)
-    horizon = int(dataset_steps)
-    dataset_max_episode_steps = int(min(int(horizon), dataset_steps - 1))
-
-    with out_path.open("w", encoding="utf-8") as fw:
-        fw.write("baseline_cost_allprice\n")
-        fw.write(f"dataset_steps={dataset_steps} max_episode_steps={dataset_max_episode_steps}\n")
-        fw.write(
-            "grid_prices=0.1..1.0 step=0.1 "
-            f"episodes={int(episodes)} gamma={float(gamma)} alpha_tail={float(alpha_tail)} "
-            f"dt={float(dt)} horizon={int(horizon)} n0={float(n0)} seed={int(seed)}\n"
-        )
-        fw.write(f"poisson_params eta={float(eta)} thet={float(thet)} k={float(k)} omega={float(omega)}\n")
-        fw.write("\n")
-
-        for price in price_grid:
-            p = float(np.clip(float(price), float(p_min), float(p_max)))
-
-            discounted_costs: List[float] = []
-            undiscounted_costs: List[float] = []
-            total_rewards: List[float] = []
-
-            count_cost_gt_0 = 0
-            count_cost_gt_0_1 = 0
-            count_cost_gt_0_2 = 0
-            count_cost_gt_0_3 = 0
-            count_cost_gt_0_4 = 0
-            count_cost_gt_0_5 = 0
-
-            for ep in range(int(episodes)):
-                series = ExcessiveCapacitySeries(raw_capacity.copy())
-                cfg = PricingEnvConfig(
-                    p_min=float(p_min),
-                    p_max=float(p_max),
-                    dt=float(dt),
-                    horizon=int(horizon),
-                    n0=float(n0),
-                    seed=int(seed) + int(ep),
-                )
-                env = PreemptivePricingEnv(series, cfg, f_arrival_rate=f, g_departure_rate=g)
-                st = _rollout_episode_stats(env, fixed_price=p, gamma=float(gamma))
-                discounted_costs.append(st.discounted_cost)
-                undiscounted_costs.append(st.undiscounted_cost)
-                total_rewards.append(st.total_reward)
-                count_cost_gt_0 += st.count_cost_gt_0
-                count_cost_gt_0_1 += st.count_cost_gt_0_1
-                count_cost_gt_0_2 += st.count_cost_gt_0_2
-                count_cost_gt_0_3 += st.count_cost_gt_0_3
-                count_cost_gt_0_4 += st.count_cost_gt_0_4
-                count_cost_gt_0_5 += st.count_cost_gt_0_5
-
-            disc_stats = _summarize(np.asarray(discounted_costs, dtype=np.float64), alpha_tail=float(alpha_tail))
-            undis_stats = _summarize(np.asarray(undiscounted_costs, dtype=np.float64), alpha_tail=float(alpha_tail))
-            rew_stats = _summarize(np.asarray(total_rewards, dtype=np.float64), alpha_tail=1.0)
-
-            denom_eps = max(1, int(episodes))
-            mean_cost_gt_0 = float(count_cost_gt_0) / float(denom_eps)
-            mean_cost_gt_0_1 = float(count_cost_gt_0_1) / float(denom_eps)
-            mean_cost_gt_0_2 = float(count_cost_gt_0_2) / float(denom_eps)
-            mean_cost_gt_0_3 = float(count_cost_gt_0_3) / float(denom_eps)
-            mean_cost_gt_0_4 = float(count_cost_gt_0_4) / float(denom_eps)
-            mean_cost_gt_0_5 = float(count_cost_gt_0_5) / float(denom_eps)
-
-            fw.write(f"price={p:.2f}\n")
-            fw.write("discounted_cost\n")
-            for kk, vv in disc_stats.items():
-                fw.write(f"  {kk}={vv:.6f}\n")
-            fw.write("undiscounted_cost\n")
-            for kk, vv in undis_stats.items():
-                fw.write(f"  {kk}={vv:.6f}\n")
-            fw.write("total_reward\n")
-            for kk, vv in rew_stats.items():
-                fw.write(f"  {kk}={vv:.6f}\n")
-            fw.write("instant_cost_counts_mean_per_episode\n")
-            fw.write(f"  gt_0={mean_cost_gt_0:.6f}\n")
-            fw.write(f"  gt_0_1={mean_cost_gt_0_1:.6f}\n")
-            fw.write(f"  gt_0_2={mean_cost_gt_0_2:.6f}\n")
-            fw.write(f"  gt_0_3={mean_cost_gt_0_3:.6f}\n")
-            fw.write(f"  gt_0_4={mean_cost_gt_0_4:.6f}\n")
-            fw.write(f"  gt_0_5={mean_cost_gt_0_5:.6f}\n")
-            fw.write("\n")
-
-    return out_path
 
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--excessive_capacity_npz", type=str, default="wc_sac/dataset/excessive_capacity_cpu_300sec.npz")
-    parser.add_argument("--p_min", type=float, default=0.1)
+    parser.add_argument("--p_min", type=float, default=0.01)
     parser.add_argument("--p_max", type=float, default=1.0)
     parser.add_argument("--dt", type=float, default=300.0)
     parser.add_argument("--horizon", type=int, default=288)
     parser.add_argument("--n0", type=float, default=0.0)
     parser.add_argument("--seed", type=int, default=0)
 
+    # 泊松率函数参数
     parser.add_argument("--eta", type=float, default=0.33)
     parser.add_argument("--thet", type=float, default=0.33)
     parser.add_argument("--k", type=float, default=2.0)
     parser.add_argument("--omega", type=float, default=2.4)
 
-    parser.add_argument("--price", type=float, default=0.5)
-    parser.add_argument("--episodes", type=int, default=1000)
-    parser.add_argument("--gamma", type=float, default=0.99)
-    parser.add_argument("--alpha_tail", type=float, default=0.1)
-    parser.add_argument("--trace_episode", type=int, default=0)
-    parser.add_argument("--log_all_prices", action="store_true")
-    parser.add_argument(
-        "--plot_out_png",
-        type=str,
-        nargs="?",
-        const="data/baseLineCVaR/baseline_cost_capacity.png",
-        default=None,
-    )
+    # 静态策略参数
+    parser.add_argument("--price", type=float, default=0.5, help="Static fixed price")
+    
+    # 模拟参数 (保持与 train_pricing_wcsac 一致的接口)
+    parser.add_argument("--exp_name", type=str, default="fixed_price_baseline")
+    parser.add_argument("--cpu", type=int, default=1)
+    parser.add_argument("--epochs", type=int, default=100)
+    parser.add_argument("--steps_per_epoch", type=int, default=30000)
+    parser.add_argument("--update_freq", type=int, default=100)
+    parser.add_argument("--train_print_freq", type=int, default=10) # 每10个update打印一次，即1000 steps
+    parser.add_argument("--reward_scale", type=float, default=1e-3)
+
     args = parser.parse_args()
 
-    if bool(args.log_all_prices):
-        out_path = baseline_log_output(
-            excessive_capacity_npz=args.excessive_capacity_npz,
-            out_path="data/baseLineCVaR/baseline_cost_allprice",
-            p_min=args.p_min,
-            p_max=args.p_max,
-            dt=args.dt,
-            horizon=args.horizon,
-            n0=args.n0,
-            eta=args.eta,
-            thet=args.thet,
-            k=args.k,
-            omega=args.omega,
-            episodes=args.episodes,
-            gamma=args.gamma,
-            alpha_tail=args.alpha_tail,
-            seed=args.seed,
-        )
-        print(f"[ok] saved log: {out_path}")
-        return
-
-    result = run_baseline_cvar(
-        excessive_capacity_npz=args.excessive_capacity_npz,
+    series = ExcessiveCapacitySeries.from_npz(args.excessive_capacity_npz)
+    cfg = PricingEnvConfig(
         p_min=args.p_min,
         p_max=args.p_max,
         dt=args.dt,
         horizon=args.horizon,
         n0=args.n0,
-        eta=args.eta,
-        thet=args.thet,
-        k=args.k,
-        omega=args.omega,
-        fixed_price=args.price,
-        episodes=args.episodes,
-        gamma=args.gamma,
-        alpha_tail=args.alpha_tail,
         seed=args.seed,
-        trace_episode=args.trace_episode,
     )
+    f, g = make_poisson_rates(args.eta, args.thet, args.k, args.omega)
 
-    disc_stats = _summarize(result.discounted_costs, alpha_tail=result.alpha_tail)
-    undis_stats = _summarize(result.undiscounted_costs, alpha_tail=result.alpha_tail)
+    def env_fn():
+        return PreemptivePricingEnv(series, cfg, f_arrival_rate=f, g_departure_rate=g)
 
-    print("baseline_fixed_price_cvar")
-    print(f"price={result.price} episodes={result.episodes} gamma={result.gamma} alpha_tail={result.alpha_tail}")
-    print("discounted_cost")
-    for k, v in disc_stats.items():
-        print(f"  {k}={v:.6f}")
-    print("undiscounted_cost")
-    for k, v in undis_stats.items():
-        print(f"  {k}={v:.6f}")
+    # 设置日志配置
+    logger_kwargs = setup_logger_kwargs(args.exp_name, seed=args.seed)
 
-    if args.plot_out_png is not None:
-        if result.trace_costs is None or result.trace_excessive_capacity is None:
-            raise RuntimeError("Missing trace data: trace_episode was not recorded.")
-        title = (
-            f"baseline trace | price={result.price} | "
-            f"episode={int(args.trace_episode)} | horizon={int(args.horizon)}"
-        )
-        _plot_cost_and_capacity(
-            costs=result.trace_costs,
-            excessive_capacity=result.trace_excessive_capacity,
-            out_png=args.plot_out_png,
-            title=title,
-        )
-        print(f"[ok] saved figure: {args.plot_out_png}")
+    run_static_baseline(
+        env_fn,
+        price=args.price,
+        seed=args.seed,
+        steps_per_epoch=args.steps_per_epoch,
+        epochs=args.epochs,
+        update_freq=args.update_freq,
+        logger_kwargs=logger_kwargs,
+        reward_scale=args.reward_scale,
+        train_print_freq=args.train_print_freq
+    )
 
 
 if __name__ == "__main__":

@@ -1,16 +1,23 @@
 #Portions of the code are adapted from Safety Starter Agents and Spinning Up, released by OpenAI under the MIT license.
 #!/usr/bin/env python
 
-from functools import partial
+import atexit
+import os
+import os.path as osp
+import time
+
 import numpy as np
 import tensorflow as tf
-import gym
-import time
+if tf.__version__.startswith('2'):
+    import tensorflow.compat.v1 as tf_v1
+    tf_v1.disable_eager_execution()
+    tf = tf_v1
+
+from wc_sac.envs.preemptive_pricing_env import ExcessiveCapacitySeries, PreemptivePricingEnv, PricingEnvConfig
 from wc_sac.utils.logx import EpochLogger
 from wc_sac.utils.mpi_tf import sync_all_params, MpiAdamOptimizer
-from wc_sac.utils.mpi_tools import mpi_fork, mpi_sum, proc_id, mpi_statistics_scalar, num_procs
-from safety_gym.envs.engine import Engine
-from gym.envs.registration import register
+from wc_sac.utils.mpi_tools import mpi_sum, proc_id, num_procs
+from wc_sac.utils.run_utils import setup_logger_kwargs
 
 EPS = 1e-8
 
@@ -100,7 +107,7 @@ def get_target_update(main_name, target_name, polyak):
 Policies
 """
 
-LOG_STD_MAX = 2
+LOG_STD_MAX = 1
 LOG_STD_MIN = -20
 
 def mlp_gaussian_policy(x, a, hidden_sizes, activation, output_activation):
@@ -205,8 +212,10 @@ def sac(env_fn, actor_fn=mlp_actor, critic_fn=mlp_critic, ac_kwargs=dict(), seed
         max_ep_len=1000, logger_kwargs=dict(), save_freq=10, local_update_after=int(1e3),
         update_freq=1, render=False, 
         fixed_entropy_bonus=None, entropy_constraint=-1.0,
-        fixed_cost_penalty=None, cost_constraint=None, cost_lim=None,
-        reward_scale=1, lr_scale = 1, damp_scale = 0,
+        fixed_cost_penalty=None, cost_lim=None,
+        reward_scale=1, lr_scale=1,
+        train_print_freq=10,
+        resume_from=None,
         ):
     """
 
@@ -310,12 +319,20 @@ def sac(env_fn, actor_fn=mlp_actor, critic_fn=mlp_critic, ac_kwargs=dict(), seed
             Units are (expectation of undiscounted sum of costs in a single episode).
             If None, cost_lim is not used, and if no cost constraints are used, do naive optimization.
     """
-    use_costs = fixed_cost_penalty or cost_constraint or cost_lim
+    use_costs = (fixed_cost_penalty is not None) or (cost_lim is not None)
 
     logger = EpochLogger(**logger_kwargs)
     logger.save_config(locals())
 
-    # Env instantiation
+    train_log_f = None
+    if proc_id() == 0:
+        try:
+            train_log_path = osp.join(logger.output_dir, "train_updates.txt")
+            train_log_f = open(train_log_path, "a", buffering=1, encoding="utf-8")
+            atexit.register(train_log_f.close)
+        except Exception:
+            train_log_f = None
+
     env, test_env = env_fn(), env_fn()
     
     obs_dim = env.observation_space.shape[0]
@@ -367,7 +384,7 @@ def sac(env_fn, actor_fn=mlp_actor, critic_fn=mlp_critic, ac_kwargs=dict(), seed
         alpha = tf.nn.softplus(soft_alpha)
     else:
         alpha = tf.constant(fixed_entropy_bonus)
-    log_alpha = tf.log(alpha)
+    log_alpha = tf.log(tf.clip_by_value(alpha, 1e-8, 1e8))
 
     # Cost penalty
     if use_costs:
@@ -378,10 +395,10 @@ def sac(env_fn, actor_fn=mlp_actor, critic_fn=mlp_critic, ac_kwargs=dict(), seed
                                              trainable=True,
                                              dtype=tf.float32)
             beta = tf.nn.softplus(soft_beta)
-            log_beta = tf.log(beta)
+            log_beta = tf.log(tf.clip_by_value(beta, 1e-8, 1e8))
         else:
             beta = tf.constant(fixed_cost_penalty)
-            log_beta = tf.log(beta)
+            log_beta = tf.log(tf.clip_by_value(beta, 1e-8, 1e8))
     else:
         beta = 0.0  # costs do not contribute to policy optimization
         print('Not using costs')
@@ -401,13 +418,16 @@ def sac(env_fn, actor_fn=mlp_actor, critic_fn=mlp_critic, ac_kwargs=dict(), seed
 
     # Targets for Q and V regression
     q_backup = tf.stop_gradient(r_ph + gamma*(1-d_ph)*(min_q_pi_targ - alpha * logp_pi2))
-    qc_backup = tf.stop_gradient(c_ph + gamma*(1-d_ph)*qc_pi_targ)
-    
-    cost_constraint = cost_lim * (1 - gamma ** max_ep_len) / (1 - gamma) / max_ep_len
-    damp = damp_scale * tf.reduce_mean(cost_constraint - qc)
+    qc_pos = tf.nn.softplus(qc)
+    qc_pi_pos = tf.nn.softplus(qc_pi)
+    qc_pi_targ_pos = tf.nn.softplus(qc_pi_targ)
+    qc_backup = tf.stop_gradient(c_ph + gamma*(1-d_ph)*qc_pi_targ_pos)
     
     # Soft actor-critic losses
-    pi_loss = tf.reduce_mean(alpha * logp_pi - min_q_pi + (beta - damp) * qc_pi)
+    pi_loss = tf.reduce_mean(alpha * logp_pi - min_q_pi + beta * qc_pi_pos)
+    pi_ent_term = tf.reduce_mean(alpha * logp_pi)
+    pi_q_term = tf.reduce_mean(min_q_pi)
+    pi_cost_term = tf.reduce_mean(beta * qc_pi_pos)
     qr1_loss = 0.5 * tf.reduce_mean((q_backup - qr1)**2)
     qr2_loss = 0.5 * tf.reduce_mean((q_backup - qr2)**2)
     qc_loss = 0.5 * tf.reduce_mean((qc_backup - qc)**2)
@@ -420,17 +440,15 @@ def sac(env_fn, actor_fn=mlp_actor, critic_fn=mlp_critic, ac_kwargs=dict(), seed
     alpha_loss = - alpha * (entropy_constraint - pi_entropy)
     print('using entropy constraint', entropy_constraint)
 
-    # Loss for beta
     if use_costs:
-        if cost_constraint is None:
-            # Convert assuming equal cost accumulated each step
-            # Note this isn't the case, since the early in episode doesn't usually have cost,
-            # but since our algorithm optimizes the discounted infinite horizon from each entry
-            # in the replay buffer, we should be approximately correct here.
-            # It's worth checking empirical total undiscounted costs to see if they match.
-            cost_constraint = cost_lim * (1 - gamma ** max_ep_len) / (1 - gamma) / max_ep_len
-        print('using cost constraint', cost_constraint)
-        beta_loss = beta * (cost_constraint - qc)
+        if fixed_cost_penalty is None:
+            if cost_lim is None:
+                raise ValueError("use_costs=True 且 fixed_cost_penalty=None 时，必须提供 cost_lim（期望成本阈值）。")
+            if proc_id() == 0:
+                print('using expected cost_lim', cost_lim)
+            beta_loss = tf.reduce_mean(beta * (float(cost_lim) - qc_pi_pos))
+        else:
+            beta_loss = tf.constant(0.0, dtype=tf.float32)
 
     # Policy train op
     # (has to be separate from value train op, because qr1_pi appears in pi_loss)
@@ -472,16 +490,68 @@ def sac(env_fn, actor_fn=mlp_actor, critic_fn=mlp_critic, ac_kwargs=dict(), seed
     # As a shortcut, use our exponential moving average update w/ coefficient zero
     target_init = get_target_update('main', 'target', 0.0)
 
+    saver = tf.train.Saver(max_to_keep=5)
+
     sess = tf.Session()
     sess.run(tf.global_variables_initializer())
     sess.run(target_init)
+
+    def _resolve_latest_simple_save_suffix(fpath):
+        candidates = []
+        for name in os.listdir(fpath):
+            if not name.startswith("simple_save"):
+                continue
+            suffix = name[len("simple_save") :]
+            if suffix == "":
+                candidates.append("")
+                continue
+            try:
+                candidates.append(str(int(suffix)))
+            except Exception:
+                continue
+        numeric = [c for c in candidates if c != ""]
+        if numeric:
+            return str(max(int(x) for x in numeric))
+        return "" if "" in candidates else None
+
+    if resume_from is not None and str(resume_from).strip() != "":
+        resume_from = osp.abspath(str(resume_from))
+        ckpt_path = None
+
+        ckpt_dir = osp.join(resume_from, "checkpoints")
+        if osp.isdir(ckpt_dir):
+            try:
+                ckpt_path = tf.train.latest_checkpoint(ckpt_dir)
+            except Exception:
+                ckpt_path = None
+
+        if ckpt_path is None:
+            suffix = _resolve_latest_simple_save_suffix(resume_from)
+            if suffix is not None:
+                simple_save_dir = osp.join(resume_from, "simple_save" + suffix)
+                variables_prefix = osp.join(simple_save_dir, "variables", "variables")
+                if osp.exists(variables_prefix + ".index"):
+                    ckpt_path = variables_prefix
+
+        if ckpt_path is not None:
+            if proc_id() == 0:
+                print(f"[resume] restoring from: {ckpt_path}")
+                saver.restore(sess, ckpt_path)
+        else:
+            if proc_id() == 0:
+                print(f"[resume] no checkpoint found under: {resume_from}")
 
     # Sync params across processes
     sess.run(sync_all_params())
 
     # Setup model saving
     logger.setup_tf_saver(sess, inputs={'x': x_ph, 'a': a_ph},
-                                outputs={'mu': mu, 'pi': pi, 'qr1': qr1, 'qr2': qr2, 'qc': qc})
+                                outputs={'mu': mu, 'pi': pi, 'qr1': qr1, 'qr2': qr2, 'qc': qc_pos})
+
+    checkpoint_dir = None
+    if proc_id() == 0:
+        checkpoint_dir = osp.join(logger.output_dir, "checkpoints")
+        os.makedirs(checkpoint_dir, exist_ok=True)
 
     def get_action(o, deterministic=False):
         act_op = mu if deterministic else pi
@@ -506,9 +576,24 @@ def sac(env_fn, actor_fn=mlp_actor, critic_fn=mlp_critic, ac_kwargs=dict(), seed
     total_steps = steps_per_epoch * epochs
 
     # variables to measure in an update
-    vars_to_get = dict(LossPi=pi_loss, LossQR1=qr1_loss, LossQR2=qr2_loss, LossQC=qc_loss,
-                       QR1Vals=qr1, QR2Vals=qr2, QCVals = qc, LogPi=logp_pi, PiEntropy=pi_entropy,
-                       Alpha=alpha, LogAlpha=log_alpha, LossAlpha=alpha_loss)
+    vars_to_get = dict(
+        LossPi=pi_loss,
+        LossQR1=qr1_loss,
+        LossQR2=qr2_loss,
+        LossQC=qc_loss,
+        QR1Vals=qr1,
+        QR2Vals=qr2,
+        QCVals=qc_pos,
+        LogPi=logp_pi,
+        PiEntropy=pi_entropy,
+        Alpha=alpha,
+        LogAlpha=log_alpha,
+        LossAlpha=alpha_loss,
+        QcPi=qc_pi_pos,
+        PiEntTerm=pi_ent_term,
+        PiQTerm=pi_q_term,
+        PiCostTerm=pi_cost_term,
+    )
     if use_costs:
         vars_to_get.update(dict(Beta=beta, LogBeta=log_beta, LossBeta=beta_loss))
 
@@ -520,6 +605,11 @@ def sac(env_fn, actor_fn=mlp_actor, critic_fn=mlp_critic, ac_kwargs=dict(), seed
     local_steps = 0
     local_steps_per_epoch = steps_per_epoch // num_procs()
     local_batch_size = batch_size // num_procs()
+
+    # Buffers for window-averaged statistics (between train_print_freq logs)
+    current_window_raw_rews = []
+    current_window_costs = []
+
     epoch_start_time = time.time()
     for t in range(total_steps // num_procs()):
         """
@@ -534,6 +624,11 @@ def sac(env_fn, actor_fn=mlp_actor, critic_fn=mlp_critic, ac_kwargs=dict(), seed
 
         # Step the env
         o2, r, d, info = env.step(a)
+
+        # Track raw reward and cost for window logging
+        current_window_raw_rews.append(r)
+        current_window_costs.append(info.get('cost', 0))
+
         r *= reward_scale  # yee-haw
         c = info.get('cost', 0)
         ep_ret += r
@@ -575,10 +670,51 @@ def sac(env_fn, actor_fn=mlp_actor, critic_fn=mlp_critic, ac_kwargs=dict(), seed
                              d_ph: batch['done'],
                             }
                 if t < local_update_after:
-                    logger.store(**sess.run(vars_to_get, feed_dict))
+                    values = sess.run(vars_to_get, feed_dict)
+                    logger.store(**values)
                 else:
                     values, _ = sess.run([vars_to_get, grouped_update], feed_dict)
                     logger.store(**values)
+
+                if proc_id() == 0 and train_print_freq is not None and train_print_freq > 0:
+                    update_block = (t // update_freq)
+                    if (j == 0) and (update_block % int(train_print_freq) == 0):
+                        def _mean(x):
+                            try:
+                                return float(np.mean(x))
+                            except Exception:
+                                return float(x)
+
+                        batch_costs = np.asarray(batch.get('costs', []), dtype=np.float64).reshape(-1)
+                        if batch_costs.size > 0:
+                            batch_cost_mean = float(np.mean(batch_costs))
+                            batch_cost_max = float(np.max(batch_costs))
+                            batch_cost_nz = float(np.mean(batch_costs > 0.0))
+                        else:
+                            batch_cost_mean = 0.0
+                            batch_cost_max = 0.0
+                            batch_cost_nz = 0.0
+
+                        # Calculate window means
+                        win_rew_mean = float(np.mean(current_window_raw_rews)) if current_window_raw_rews else 0.0
+                        win_cost_mean = float(np.mean(current_window_costs)) if current_window_costs else 0.0
+                        
+                        # Reset window buffers
+                        current_window_raw_rews = []
+                        current_window_costs = []
+
+                        msg = (
+                            f"[train] t={t:6d} | LossPi={_mean(values.get('LossPi')): .4f} "
+                            f"| PiEntropy={_mean(values.get('PiEntropy')): .4f} | Alpha={_mean(values.get('Alpha')): .4f} "
+                            f"| MinQ={_mean(values.get('PiQTerm')): .4f} "
+                            f"| QcPi={_mean(values.get('QcPi')): .4f}"
+                            f"| BatchCostMean={batch_cost_mean: .4f} | BatchCostMax={batch_cost_max: .4f} | BatchCostNZ={batch_cost_nz: .4f}"
+                            f"| WinRewMean={win_rew_mean: .4f} | WinCostMean={win_cost_mean: .4f}"
+                        )
+                        if use_costs:
+                            msg += f" | Beta={_mean(values.get('Beta')): .4f}"
+                        if train_log_f is not None:
+                            train_log_f.write(msg + "\n")
 
         # End of epoch wrap-up
         if t > 0 and t % local_steps_per_epoch == 0:
@@ -596,6 +732,8 @@ def sac(env_fn, actor_fn=mlp_actor, critic_fn=mlp_critic, ac_kwargs=dict(), seed
             # Save model
             if (epoch % save_freq == 0) or (epoch == epochs-1):
                 logger.save_state({'env': env}, number_model)
+                if proc_id() == 0 and checkpoint_dir is not None:
+                    saver.save(sess, osp.join(checkpoint_dir, "model"), global_step=number_model)
                 number_model += 1
 
             # Test the performance of the deterministic version of the agent.
@@ -640,53 +778,108 @@ def sac(env_fn, actor_fn=mlp_actor, critic_fn=mlp_critic, ac_kwargs=dict(), seed
             logger.log_tabular('TotalTime', time.time()-start_time)
             logger.dump_tabular()
 
-if __name__ == '__main__':
-    import json
+def make_poisson_rates(eta: float, thet: float, k: float, omega: float):
+    def f(p: float) -> float:
+        try:
+            val = eta * (1.0 - float(p) ** k) ** omega
+        except Exception:
+            val = 0.0
+        return max(float(val), 0.0)
+
+    def g(p: float) -> float:
+        try:
+            val = thet - thet * (1.0 - float(p) ** k) ** omega
+        except Exception:
+            val = 0.0
+        return max(float(val), 0.0)
+
+    return f, g
+
+
+def main(argv=None):
     import argparse
+
     parser = argparse.ArgumentParser()
-    parser.add_argument('--env', type=str, default='Safexp-PointGoal1-v0')
-    parser.add_argument('--hid', type=int, default=256)
-    parser.add_argument('--l', type=int, default=2)
-    parser.add_argument('--gamma', type=float, default=0.99)
-    parser.add_argument('--lr', type=float, default=1e-3)
-    parser.add_argument('--seed', '-s', type=int, default=0)
-    parser.add_argument('--epochs', type=int, default=100)
-    parser.add_argument('--exp_name', type=str, default='sac')
-    parser.add_argument('--steps_per_epoch', type=int, default=30000)
-    parser.add_argument('--update_freq', type=int, default=100)
-    parser.add_argument('--cpu', type=int, default=4)
-    parser.add_argument('--render', default=False, action='store_true')
-    parser.add_argument('--local_start_steps', default=500, type=int)
-    parser.add_argument('--local_update_after', default=500, type=int)
-    parser.add_argument('--batch_size', default=256, type=int)
-    parser.add_argument('--fixed_entropy_bonus', default=None, type=float)
-    parser.add_argument('--entropy_constraint', type=float, default= -1)
-    parser.add_argument('--fixed_cost_penalty', default=None, type=float)
-    parser.add_argument('--cost_constraint', type=float, default=None)
-    parser.add_argument('--cost_lim', type=float, default=None)
-    parser.add_argument('--lr_s', type=int, default=50)
-    parser.add_argument('--damp_s', type=int, default=10)
-    parser.add_argument('--logger_kwargs_str', type=json.loads, default='{"output_dir": "./data"}')
-    args = parser.parse_args()
+    parser.add_argument("--excessive_capacity_npz", type=str, default="wc_sac/dataset/excessive_capacity_cpu_300sec.npz")
+    parser.add_argument("--p_min", type=float, default=0.01)
+    parser.add_argument("--p_max", type=float, default=1.0)
+    parser.add_argument("--dt", type=float, default=300.0)
+    parser.add_argument("--horizon", type=int, default=288)
+    parser.add_argument("--n0", type=float, default=0.0)
+    parser.add_argument("--seed", type=int, default=0)
 
-    try:
-        import safety_gym
-    except:
-        print('Make sure to install Safety Gym to use constrained RL environments.')
+    parser.add_argument("--eta", type=float, default=0.33)
+    parser.add_argument("--thet", type=float, default=0.33)
+    parser.add_argument("--k", type=float, default=2.0)
+    parser.add_argument("--omega", type=float, default=2.4)
 
-    mpi_fork(args.cpu)
+    parser.add_argument("--hid", type=int, default=256)
+    parser.add_argument("--l", type=int, default=2)
+    parser.add_argument("--gamma", type=float, default=0.99)
+    parser.add_argument("--lr", type=float, default=1e-3)
+    parser.add_argument("--epochs", type=int, default=100)
+    parser.add_argument("--exp_name", type=str, default="saclag")
+    parser.add_argument("--steps_per_epoch", type=int, default=30000)
+    parser.add_argument("--update_freq", type=int, default=100)
+    parser.add_argument("--cpu", type=int, default=1)
+    parser.add_argument("--local_start_steps", default=500, type=int)
+    parser.add_argument("--local_update_after", default=500, type=int)
+    parser.add_argument("--batch_size", default=256, type=int)
+    parser.add_argument("--fixed_entropy_bonus", default=None, type=float)
+    parser.add_argument("--entropy_constraint", type=float, default=-1)
+    parser.add_argument("--fixed_cost_penalty", default=None, type=float)
+    parser.add_argument("--cost_lim", type=float, default=6.0)
+    parser.add_argument("--lr_s", type=float, default=0.1)
+    parser.add_argument("--reward_scale", type=float, default=1e-3)
+    parser.add_argument("--train_print_freq", type=int, default=10)
+    parser.add_argument(
+        "--resume_from",
+        type=str,
+        default=None,
+        help="从指定训练目录恢复参数继续训练（目录内含 checkpoints/ 或 simple_save*）",
+    )
+    args = parser.parse_args(argv)
 
-    from wc_sac.utils.run_utils import setup_logger_kwargs
-    
-    logger_kwargs = setup_logger_kwargs(args.exp_name, args.seed)
-    logger_kwargs= args.logger_kwargs_str
+    series = ExcessiveCapacitySeries.from_npz(args.excessive_capacity_npz)
+    cfg = PricingEnvConfig(
+        p_min=args.p_min,
+        p_max=args.p_max,
+        dt=args.dt,
+        horizon=args.horizon,
+        n0=args.n0,
+        seed=args.seed,
+    )
+    f, g = make_poisson_rates(args.eta, args.thet, args.k, args.omega)
 
-    sac(lambda : gym.make(args.env), actor_fn=mlp_actor, critic_fn=mlp_critic,
-        ac_kwargs=dict(hidden_sizes=[args.hid]*args.l),
-        gamma=args.gamma, seed=args.seed, epochs=args.epochs, batch_size=args.batch_size,
-        logger_kwargs=logger_kwargs, steps_per_epoch=args.steps_per_epoch,
-        update_freq=args.update_freq, lr=args.lr, render=args.render,
-        local_start_steps=args.local_start_steps, local_update_after=args.local_update_after,
-        fixed_entropy_bonus=args.fixed_entropy_bonus, entropy_constraint=args.entropy_constraint,
-        fixed_cost_penalty=args.fixed_cost_penalty, cost_constraint=args.cost_constraint, cost_lim = args.cost_lim, lr_scale = args.lr_s, damp_scale = args.damp_s,
-        )
+    def env_fn():
+        return PreemptivePricingEnv(series, cfg, f_arrival_rate=f, g_departure_rate=g)
+
+    logger_kwargs = setup_logger_kwargs(args.exp_name, seed=args.seed)
+
+    sac(
+        env_fn,
+        ac_kwargs=dict(hidden_sizes=[args.hid] * args.l),
+        gamma=args.gamma,
+        seed=args.seed,
+        epochs=args.epochs,
+        batch_size=args.batch_size,
+        steps_per_epoch=args.steps_per_epoch,
+        update_freq=args.update_freq,
+        lr=args.lr,
+        local_start_steps=args.local_start_steps,
+        local_update_after=args.local_update_after,
+        fixed_entropy_bonus=args.fixed_entropy_bonus,
+        entropy_constraint=args.entropy_constraint,
+        fixed_cost_penalty=args.fixed_cost_penalty,
+        cost_lim=args.cost_lim,
+        lr_scale=args.lr_s,
+        reward_scale=args.reward_scale,
+        max_ep_len=args.horizon,
+        logger_kwargs=logger_kwargs,
+        train_print_freq=args.train_print_freq,
+        resume_from=args.resume_from,
+    )
+
+
+if __name__ == "__main__":
+    main()

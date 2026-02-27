@@ -718,6 +718,11 @@ def sac(env_fn, actor_fn=mlp_actor, critic_fn=mlp_critic, var_fn=mlp_var, ac_kwa
     local_steps = 0
     local_steps_per_epoch = steps_per_epoch // num_procs()
     local_batch_size = batch_size // num_procs()
+    
+    # Buffers for window-averaged statistics (between train_print_freq logs)
+    current_window_raw_rews = []
+    current_window_costs = []
+    
     epoch_start_time = time.time()
     for t in range(total_steps // num_procs()):
         """
@@ -732,6 +737,11 @@ def sac(env_fn, actor_fn=mlp_actor, critic_fn=mlp_critic, var_fn=mlp_var, ac_kwa
 
         # Step the env
         o2, r, d, info = env.step(a)
+        
+        # Track raw reward and cost for window logging
+        current_window_raw_rews.append(r)
+        current_window_costs.append(info.get('cost', 0))
+        
         r *= reward_scale  # yee-haw
         c = info.get('cost', 0)
         ep_ret += r
@@ -805,6 +815,14 @@ def sac(env_fn, actor_fn=mlp_actor, critic_fn=mlp_critic, var_fn=mlp_var, ac_kwa
                             batch_cost_mean = 0.0
                             batch_cost_max = 0.0
                             batch_cost_nz = 0.0
+                            
+                        # Calculate window means
+                        win_rew_mean = float(np.mean(current_window_raw_rews)) if current_window_raw_rews else 0.0
+                        win_cost_mean = float(np.mean(current_window_costs)) if current_window_costs else 0.0
+                        
+                        # Reset window buffers
+                        current_window_raw_rews = []
+                        current_window_costs = []
 
                         msg = (
                             f"[train] t={t:6d} | LossPi={_mean(values.get('LossPi')): .4f} "
@@ -812,6 +830,7 @@ def sac(env_fn, actor_fn=mlp_actor, critic_fn=mlp_critic, var_fn=mlp_var, ac_kwa
                             f"| MinQ={_mean(values.get('PiQTerm')): .4f} "
                             f"| QcPiCVaR={_mean(values.get('QcPiCVaR')): .4f} | QcPi={_mean(values.get('QcPi')): .4f} | QcPiVar={_mean(values.get('QcPiVar')): .4f}"
                             f"| BatchCostMean={batch_cost_mean: .4f} | BatchCostMax={batch_cost_max: .4f} | BatchCostNZ={batch_cost_nz: .4f}"
+                            f"| WinRewMean={win_rew_mean: .4f} | WinCostMean={win_cost_mean: .4f}"
                         )
                         if use_costs:
                             msg += f" | Beta={_mean(values.get('Beta')): .4f}"

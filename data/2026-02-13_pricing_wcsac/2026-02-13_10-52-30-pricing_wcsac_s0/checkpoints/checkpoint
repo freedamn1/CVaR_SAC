@@ -1,5 +1,0 @@
-model_checkpoint_path: "/workspace/CVaR_SAC/data/2026-02-13_pricing_wcsac/2026-02-13_10-52-30-pricing_wcsac_s0/checkpoints/model-3"
-all_model_checkpoint_paths: "/workspace/CVaR_SAC/data/2026-02-13_pricing_wcsac/2026-02-13_10-52-30-pricing_wcsac_s0/checkpoints/model-0"
-all_model_checkpoint_paths: "/workspace/CVaR_SAC/data/2026-02-13_pricing_wcsac/2026-02-13_10-52-30-pricing_wcsac_s0/checkpoints/model-1"
-all_model_checkpoint_paths: "/workspace/CVaR_SAC/data/2026-02-13_pricing_wcsac/2026-02-13_10-52-30-pricing_wcsac_s0/checkpoints/model-2"
-all_model_checkpoint_paths: "/workspace/CVaR_SAC/data/2026-02-13_pricing_wcsac/2026-02-13_10-52-30-pricing_wcsac_s0/checkpoints/model-3"

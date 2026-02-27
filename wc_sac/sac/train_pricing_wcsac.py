@@ -22,6 +22,7 @@ from wc_sac.envs.preemptive_pricing_env import (
 )
 from wc_sac.sac.wcsac import sac
 from wc_sac.utils.run_utils import setup_logger_kwargs
+from wc_sac.utils.mpi_tools import mpi_fork
 
 
 def make_poisson_rates(eta: float, thet: float, k: float, omega: float):
@@ -47,7 +48,7 @@ def make_poisson_rates(eta: float, thet: float, k: float, omega: float):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--excessive_capacity_npz", type=str, default="wc_sac/dataset/excessive_capacity_cpu.npz")
+    parser.add_argument("--excessive_capacity_npz", type=str, default="wc_sac/dataset/excessive_capacity_cpu_300sec.npz")
     parser.add_argument("--p_min", type=float, default=0.01)
     parser.add_argument("--p_max", type=float, default=1.0)
     parser.add_argument("--dt", type=float, default=300.0)
@@ -65,10 +66,10 @@ def main():
     parser.add_argument("--hid", type=int, default=256)
     parser.add_argument("--l", type=int, default=2)
     parser.add_argument("--gamma", type=float, default=0.99)
-    parser.add_argument("--alpha_sig_level", type=float, default=0.5, help="CVaR significance level (tail proportion), e.g., 0.1 for worst 10%%")
+    parser.add_argument("--alpha_sig_level", type=float, default=0.9, help="CVaR significance level (tail proportion), e.g., 0.1 for worst 10%%")
     parser.add_argument("--lr", type=float, default=1e-3)
     parser.add_argument("--epochs", type=int, default=100)
-    parser.add_argument("--exp_name", type=str, default="pricing_wcsac")
+    parser.add_argument("--exp_name", type=str, default="wcsac-0.9")
     parser.add_argument("--steps_per_epoch", type=int, default=30000)
     parser.add_argument("--update_freq", type=int, default=100)
     parser.add_argument("--cpu", type=int, default=1)
@@ -78,7 +79,7 @@ def main():
     parser.add_argument("--fixed_entropy_bonus", default=None, type=float)
     parser.add_argument("--entropy_constraint", type=float, default=-1)
     parser.add_argument("--fixed_cost_penalty", default=None, type=float)
-    parser.add_argument("--cost_lim", type=float, default=3.0)
+    parser.add_argument("--cost_lim", type=float, default=6.0)
     parser.add_argument("--zeta", type=float, default=0.1, help="tolerance ratio in [0,1): constrain cost CVaR into (cost_lim*(1-zeta), cost_lim)")
     parser.add_argument("--lr_s", type=int, default=0.1)
     parser.add_argument("--damp_s", type=int, default=10)
@@ -90,6 +91,9 @@ def main():
         help="从指定训练目录恢复参数继续训练（目录内含 checkpoints/ 或 simple_save*）",
     )
     args = parser.parse_args()
+
+    # 启用 MPI 多进程并行
+    mpi_fork(args.cpu)
 
     series = ExcessiveCapacitySeries.from_npz(args.excessive_capacity_npz)
     cfg = PricingEnvConfig(
