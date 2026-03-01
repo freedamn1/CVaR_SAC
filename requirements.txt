@@ -25,3 +25,4 @@ mpi4py
 # Note: pip may not find TF1.15.x, use: conda install -c anaconda tensorflow=1.15.0
 # tensorflow==1.15.0; python_version < "3.9"
 
+joblib

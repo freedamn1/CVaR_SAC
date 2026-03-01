@@ -1,5 +1,5 @@
 from mpi4py import MPI
-import os, subprocess, sys
+import os, subprocess, sys, shutil
 import numpy as np
 
 
@@ -28,7 +28,11 @@ def mpi_fork(n, bind_to_core=False):
             OMP_NUM_THREADS="1",
             IN_MPI="1"
         )
-        args = ["mpirun", "-np", str(n)]
+        launcher = shutil.which("mpirun") or shutil.which("mpiexec") or "mpirun"
+        if os.path.basename(launcher).lower().startswith("mpiexec"):
+            args = [launcher, "-n", str(n)]
+        else:
+            args = [launcher, "-np", str(n)]
         if bind_to_core:
             args += ["-bind-to", "core"]
         args += [sys.executable] + sys.argv

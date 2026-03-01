@@ -891,6 +891,13 @@ def sac(env_fn, actor_fn=mlp_actor, critic_fn=mlp_critic, var_fn=mlp_var, ac_kwa
             logger.log_tabular('LossAlpha', average_only=True)
             logger.log_tabular('LogAlpha', average_only=True)
             logger.log_tabular('Alpha', average_only=True)
+            logger.log_tabular('QcPi', average_only=True)
+            logger.log_tabular('QcPiRaw', average_only=True)
+            logger.log_tabular('QcPiVar', average_only=True)
+            logger.log_tabular('QcPiCVaR', average_only=True)
+            logger.log_tabular('PiEntTerm', average_only=True)
+            logger.log_tabular('PiQTerm', average_only=True)
+            logger.log_tabular('PiCostTerm', average_only=True)
             if use_costs:
                 logger.log_tabular('LossBeta', average_only=True)
                 logger.log_tabular('LogBeta', average_only=True)

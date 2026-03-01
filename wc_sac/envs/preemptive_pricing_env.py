@@ -183,8 +183,6 @@ class PreemptivePricingEnv(gym.Env):
         # leaves = lam_l
         preempted = max(n_t + arrivals - leaves - c_t, 0.0)
         n_next = max(n_t + arrivals - leaves - preempted, 0.0)
-        if self._t % 10 == 0:  
-            print(f"local_step: {self._t}, price: {price}, arrivals: {arrivals}, leaves: {leaves}, preempted: {preempted}, n_next: {n_next}, c_t: {c_t}")
         reward = price * n_t * float(self.cfg.dt)
         cost = preempted / max(n_next + preempted, float(self.cfg.eps))
 

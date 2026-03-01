@@ -54,7 +54,7 @@ def main():
     parser.add_argument("--dt", type=float, default=300.0)
     parser.add_argument("--horizon", type=int, default=288)
     parser.add_argument("--n0", type=float, default=0.0)
-    parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument("--seed", type=int, default=1)
 
     # 泊松率函数参数：f(p)=eta*(1-p**k)**omega, g(p)=thet-thet*(1-p**k)**omega
     parser.add_argument("--eta", type=float, default=0.33, help="arrival scale eta")

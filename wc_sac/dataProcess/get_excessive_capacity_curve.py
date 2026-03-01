@@ -73,8 +73,8 @@ def plot_excessive_capacity(
 if __name__ == "__main__":
     # 默认画 300 秒序列；如果你想看 10 秒序列，把下面文件名改成 excessive_capacity_cpu_10sec.npz
     base_dir = Path(__file__).resolve().parent.parent
-    default_npz = base_dir / "dataset" / "excessive_capacity_cpu_300sec.npz"
-    default_png = base_dir / "dataset" / "excessive_capacity_cpu_curve.png"
+    default_npz = base_dir / "dataset" / "excessive_capacity_cpu_300sec_azure.npz"
+    default_png = base_dir / "dataset" / "excessive_capacity_azure.png"
 
     print(f"[info] loading: {default_npz}")
     plot_excessive_capacity(default_npz, out_png=default_png, show=False, max_points=200_000)
