@@ -1,0 +1,58 @@
+{
+    "ac_kwargs":	{
+        "hidden_sizes":	[
+            256,
+            256
+        ]
+    },
+    "actor_fn":	"mlp_actor",
+    "alpha_sig_level":	0.5,
+    "batch_size":	256,
+    "cost_lim":	5.0,
+    "critic_fn":	"mlp_critic",
+    "damp_scale":	10,
+    "entropy_constraint":	-1,
+    "env_fn":	"env_fn",
+    "epochs":	100,
+    "exp_name":	"azure_wcsac-0.5",
+    "fixed_cost_penalty":	null,
+    "fixed_entropy_bonus":	null,
+    "gamma":	0.99,
+    "local_start_steps":	500,
+    "local_update_after":	500,
+    "logger":	{
+        "<wc_sac.utils.logx.EpochLogger object at 0x7f0ea859d550>":	{
+            "epoch_dict":	{},
+            "exp_name":	"azure_wcsac-0.5",
+            "first_row":	true,
+            "log_current_row":	{},
+            "log_headers":	[],
+            "output_dir":	"/workspace/CVaR_SAC/data/2026-03-05_azure_wcsac-0.5/2026-03-05_01-50-41-azure_wcsac-0.5_s1",
+            "output_file":	{
+                "<_io.TextIOWrapper name='/workspace/CVaR_SAC/data/2026-03-05_azure_wcsac-0.5/2026-03-05_01-50-41-azure_wcsac-0.5_s1/progress.txt' mode='w' encoding='UTF-8'>":	{
+                    "mode":	"w"
+                }
+            }
+        }
+    },
+    "logger_kwargs":	{
+        "exp_name":	"azure_wcsac-0.5",
+        "output_dir":	"/workspace/CVaR_SAC/data/2026-03-05_azure_wcsac-0.5/2026-03-05_01-50-41-azure_wcsac-0.5_s1"
+    },
+    "lr":	0.001,
+    "lr_scale":	0.1,
+    "max_ep_len":	288,
+    "polyak":	0.995,
+    "render":	false,
+    "replay_size":	1000000,
+    "resume_from":	null,
+    "reward_scale":	0.001,
+    "save_freq":	10,
+    "seed":	1,
+    "steps_per_epoch":	30000,
+    "train_print_freq":	10,
+    "update_freq":	100,
+    "use_costs":	true,
+    "var_fn":	"mlp_var",
+    "zeta":	0.1
+}

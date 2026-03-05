@@ -221,7 +221,7 @@ def main():
     # 设为 1 表示不降采样（原样绘制，每点间隔1000）。
     # 设为 2 表示每 2 个点取平均，间隔变为 2000。
     # 设为 10 表示每 10 个点取平均，间隔变为 10000。
-    PLOT_DOWNSAMPLE_FACTOR = 10
+    PLOT_DOWNSAMPLE_FACTORS = [40, 10, 10]
 
     # === 实验配置区域 (请在此处手动修改) ===
     # 格式: "图例名称": ["路径1", "路径2"...] 或 "单个路径"
@@ -248,18 +248,29 @@ def main():
     # ====================================
 
     # 加载数据
-    data_dict = load_data_from_config(EXPERIMENT_CONFIG, downsample_factor=PLOT_DOWNSAMPLE_FACTOR)
+    if len(PLOT_DOWNSAMPLE_FACTORS) != 3:
+        raise ValueError("PLOT_DOWNSAMPLE_FACTORS 需要包含 3 个元素")
+    data_dict_reward = load_data_from_config(EXPERIMENT_CONFIG, downsample_factor=PLOT_DOWNSAMPLE_FACTORS[0])
+    data_dict_preemption = load_data_from_config(EXPERIMENT_CONFIG, downsample_factor=PLOT_DOWNSAMPLE_FACTORS[1])
+    data_dict_cvar = load_data_from_config(EXPERIMENT_CONFIG, downsample_factor=PLOT_DOWNSAMPLE_FACTORS[2])
     
-    # 统一数据预处理：将 t 转换为 numeric 并除以 1e6
-    for name, df in data_dict.items():
+    for name, df in data_dict_reward.items():
+        if not df.empty:
+            df['t'] = pd.to_numeric(df['t'])
+            df['t'] = df['t'] / 1e6
+    for name, df in data_dict_preemption.items():
+        if not df.empty:
+            df['t'] = pd.to_numeric(df['t'])
+            df['t'] = df['t'] / 1e6
+    for name, df in data_dict_cvar.items():
         if not df.empty:
             df['t'] = pd.to_numeric(df['t'])
             df['t'] = df['t'] / 1e6
 
     # 1. 绘制累积收益曲线 (WinRewMean)
-    if any(not df.empty for df in data_dict.values()):
+    if any(not df.empty for df in data_dict_reward.values()):
         plot_performance_curve(
-            data_dict, 
+            data_dict_reward, 
             y_col='WinRewMean', 
             ylabel='Average Reward', 
             title='Training Performance: Average Reward',
@@ -270,9 +281,9 @@ def main():
     
     # 2. 绘制平均抢占率曲线 (WinCostMean)
     # 基于 WinCostMean 字段
-    if any(not df.empty for df in data_dict.values()):
+    if any(not df.empty for df in data_dict_preemption.values()):
         plot_performance_curve(
-            data_dict,
+            data_dict_preemption,
             y_col='WinCostMean',
             ylabel='Average Preemption Rate',
             title='Training Performance: Preemption Rate',
@@ -283,7 +294,7 @@ def main():
 
     # 3. 绘制 CVaR 变化曲线 (仅 WCSAC)
     plot_cvar_curve(
-        data_dict,
+        data_dict_cvar,
         save_path='graph/graphs/cvar_cost_comparison.png'
     )
     
@@ -293,7 +304,7 @@ def main():
     
     # 子图1：Reward
     plot_performance_curve(
-        data_dict, 
+        data_dict_reward, 
         y_col='WinRewMean', 
         ylabel='Average Reward', 
         title='(a) Average Reward', 
@@ -302,14 +313,14 @@ def main():
     
     # 子图2：CVaR / Risk
     plot_cvar_curve(
-        data_dict, 
+        data_dict_cvar, 
         ax=axes[1]
     )
     axes[1].set_title('(b) Risk (CVaR) vs Expected Cost') # 覆盖默认标题
     
     # 子图3：Preemption Rate
     plot_performance_curve(
-        data_dict,
+        data_dict_preemption,
         y_col='WinCostMean',
         ylabel='Average Preemption Rate',
         title='(c) Preemption Rate',

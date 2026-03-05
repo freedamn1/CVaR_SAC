@@ -800,7 +800,7 @@ def main(argv=None):
     import argparse
 
     parser = argparse.ArgumentParser()
-    parser.add_argument("--excessive_capacity_npz", type=str, default="wc_sac/dataset/excessive_capacity_cpu_300sec.npz")
+    parser.add_argument("--excessive_capacity_npz", type=str, default="wc_sac/dataset/excessive_capacity_cpu_300sec_azure.npz")
     parser.add_argument("--p_min", type=float, default=0.01)
     parser.add_argument("--p_max", type=float, default=1.0)
     parser.add_argument("--dt", type=float, default=300.0)
@@ -818,7 +818,7 @@ def main(argv=None):
     parser.add_argument("--gamma", type=float, default=0.99)
     parser.add_argument("--lr", type=float, default=1e-3)
     parser.add_argument("--epochs", type=int, default=100)
-    parser.add_argument("--exp_name", type=str, default="saclag")
+    parser.add_argument("--exp_name", type=str, default="azure_saclag")
     parser.add_argument("--steps_per_epoch", type=int, default=30000)
     parser.add_argument("--update_freq", type=int, default=100)
     parser.add_argument("--cpu", type=int, default=1)
@@ -828,7 +828,7 @@ def main(argv=None):
     parser.add_argument("--fixed_entropy_bonus", default=None, type=float)
     parser.add_argument("--entropy_constraint", type=float, default=-1)
     parser.add_argument("--fixed_cost_penalty", default=None, type=float)
-    parser.add_argument("--cost_lim", type=float, default=6.0)
+    parser.add_argument("--cost_lim", type=float, default=5.0)
     parser.add_argument("--lr_s", type=float, default=0.1)
     parser.add_argument("--reward_scale", type=float, default=1e-3)
     parser.add_argument("--train_print_freq", type=int, default=10)

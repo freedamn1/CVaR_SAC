@@ -62,7 +62,7 @@ def _save_preemption_plot(preemption_rates: np.ndarray, dt_seconds: float, ep: i
         raise FileNotFoundError(f"dataset 目录不存在：{out_dir}")
 
     ts = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
-    out_png = out_dir / f"preemption_rate_in_test_{ts}_ep{int(ep)}.png"
+    out_png = out_dir / f"preemption_rate_in_test_saclag.png"
     fig.savefig(str(out_png), dpi=160)
     plt.close(fig)
     return str(out_png)
@@ -107,13 +107,13 @@ def rollout(
 
 def main(argv: Optional[list[str]] = None) -> None:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--fpath", type=str, default="data/2026-02-13_pricing_wcsac/2026-02-13_07-15-27-pricing_wcsac_s0", help="训练输出目录（包含 simple_save* 子目录）")
+    parser.add_argument("--fpath", type=str, default="data/2026-02-20_saclag/2026-02-20_02-30-27-saclag_s0", help="训练输出目录（包含 simple_save* 子目录）")
     parser.add_argument("--itr", type=str, default="last", help="要加载的保存迭代：last 或整数")
     parser.add_argument("--deterministic", action="store_true", help="用 mu（确定性）动作，否则用 pi")
     parser.add_argument("--episodes", type=int, default=1)
     parser.add_argument("--print_freq", type=int, default=10, help="每多少步打印一次 rollout 信息，0 表示不打印")
 
-    parser.add_argument("--excessive_capacity_npz", type=str, default="wc_sac/dataset/excessive_capacity_cpu.npz")
+    parser.add_argument("--excessive_capacity_npz", type=str, default="wc_sac/dataset/excessive_capacity_cpu_300sec.npz")
     parser.add_argument("--p_min", type=float, default=0.01)
     parser.add_argument("--p_max", type=float, default=1.0)
     parser.add_argument("--dt", type=float, default=300.0)
