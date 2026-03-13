@@ -11,25 +11,20 @@ from wc_sac.envs.preemptive_pricing_env import ExcessiveCapacitySeries, Preempti
 from wc_sac.utils.load_utils import load_policy
 
 
-###############################################################################
-# Configure runs here (no CLI args needed)
-###############################################################################
-# Each entry should be a training output directory containing `simple_save*`.
 FPATHS: list[str] = [
     "data/2026-02-20_saclag/2026-02-20_02-30-27-saclag_s0",
     "data/2026-02-26_wcsac-0.1/2026-02-26_03-42-25-wcsac-0.1_s0",
     "data/2026-02-24_wcsac-0.5/2026-02-24_23-38-56-wcsac-0.5_s0",
-    "data/2026-02-26_wcsac-0.9/2026-02-26_16-45-55-wcsac-0.9_s0"
+    "data/2026-02-26_wcsac-0.9/2026-02-26_16-45-55-wcsac-0.9_s0",
 ]
 
-# Optional labels for plotting (must match length of FPATHS). Leave empty to
-# auto-use directory names.
 LABELS: list[str] = [
     "saclag",
     "wcsac-0.1",
     "wcsac-0.5",
-    "wcsac-0.9"
+    "wcsac-0.9",
 ]
+
 
 def make_poisson_rates(eta: float, thet: float, k: float, omega: float):
     def f(p: float) -> float:
@@ -49,13 +44,12 @@ def make_poisson_rates(eta: float, thet: float, k: float, omega: float):
     return f, g
 
 
-def rollout_preemption_trace(
+def rollout_reward_trace(
     env: PreemptivePricingEnv,
     get_action: Callable[[np.ndarray], np.ndarray],
     episodes: int,
     print_freq: int,
 ) -> np.ndarray:
-    """Run multiple test episodes and return mean preemption-rate trace (shape: [T])."""
     episodes = int(episodes)
     if episodes <= 0:
         raise ValueError("episodes must be positive.")
@@ -68,8 +62,8 @@ def rollout_preemption_trace(
         trace = []
         while not done:
             a = get_action(o)
-            o, _r, done, info = env.step(a)
-            trace.append(float(info.get("cost", 0.0)))
+            o, r, done, info = env.step(a)
+            trace.append(float(r))
             ep_len += 1
             if print_freq > 0 and (ep_len % int(print_freq) == 0 or done):
                 price = float(info.get("price", np.nan))
@@ -78,12 +72,11 @@ def rollout_preemption_trace(
                 n_running = float(info.get("n_running", np.nan))
                 excessive_capacity = float(info.get("excessive_capacity", np.nan))
                 print(
-                    f"[rollout] ep={ep:3d} t={ep_len:4d} price={price: .3f} cost={cost: .6f} "
+                    f"[rollout] ep={ep:3d} t={ep_len:4d} reward={float(r): .6f} price={price: .3f} cost={cost: .6f} "
                     f"preempted={preempted: .3f} n_running={n_running: .3f} cap={excessive_capacity: .3f}"
                 )
         traces.append(np.asarray(trace, dtype=np.float64))
 
-    # All traces should have the same length because reset_for_test() starts from t=0 and ends at end of series.
     lens = {int(x.size) for x in traces}
     if len(lens) != 1:
         raise ValueError(f"Episode trace lengths are not equal: {sorted(lens)}")
@@ -98,8 +91,6 @@ def _aggregate_trace(trace: np.ndarray, num_bins: int) -> tuple[np.ndarray, np.n
     num_bins = int(num_bins)
     if num_bins <= 0:
         raise ValueError("num_bins must be positive.")
-    # Keep the same behavior as `wc_sac/sac/test_pricing_wcsac.py`:
-    # aggregate to at most 20 points for readability.
     num_bins = min(num_bins, 20, n)
     idx_chunks = np.array_split(np.arange(n, dtype=np.int32), num_bins)
     y = np.array([float(np.mean(trace[idx])) for idx in idx_chunks], dtype=np.float64)
@@ -107,7 +98,7 @@ def _aggregate_trace(trace: np.ndarray, num_bins: int) -> tuple[np.ndarray, np.n
     return x, y
 
 
-def save_multi_preemption_plot(
+def save_multi_reward_plot(
     traces: dict[str, np.ndarray],
     dt_seconds: float,
     num_bins: int,
@@ -124,19 +115,16 @@ def save_multi_preemption_plot(
         raise ImportError("缺少 matplotlib：请先安装 matplotlib") from e
 
     out_dir.mkdir(parents=True, exist_ok=True)
-    out_png = out_dir / f"preemption_rates_s{int(seed)}.png"
+    out_png = out_dir / f"reward_per_step_s{int(seed)}.png"
 
     fig, ax = plt.subplots(figsize=(12, 5))
     for label, trace in traces.items():
-        steps_agg, rate_agg = _aggregate_trace(trace, num_bins=num_bins)
+        steps_agg, reward_agg = _aggregate_trace(trace, num_bins=num_bins)
         times = steps_agg * float(dt_seconds)
-        ax.plot(times, rate_agg, linewidth=1.4, label=label)
-
-    # Threshold line (phi)
-    ax.axhline(0.05, color="black", linestyle="--", linewidth=1.2, label="threshold")
+        ax.plot(times, reward_agg, linewidth=1.4, label=label)
 
     ax.set_xlabel("time (seconds)")
-    ax.set_ylabel("preemption_rate")
+    ax.set_ylabel("reward_per_step")
     ax.set_title(title)
     ax.grid(True, alpha=0.25)
     ax.legend(fontsize=9, loc="best")
@@ -152,8 +140,8 @@ def main(argv: Optional[list[str]] = None) -> None:
     parser.add_argument("--deterministic", action="store_true", help="用 mu（确定性）动作，否则用 pi")
     parser.add_argument("--episodes", type=int, default=1, help="每个模型测试 episode 数（取均值曲线）")
     parser.add_argument("--print_freq", type=int, default=0, help="每多少步打印一次 rollout 信息，0 表示不打印")
-    parser.add_argument("--bins", type=int, default=30, help="绘图时对轨迹做分箱聚合；每条曲线最多保留 20 个点（与 test_pricing_wcsac.py 一致）")
-    parser.add_argument("--title", type=str, default="Preemption Rate (multi runs)")
+    parser.add_argument("--bins", type=int, default=30, help="绘图时对轨迹做分箱聚合；每条曲线最多保留 20 个点")
+    parser.add_argument("--title", type=str, default="Reward Per Step (multi runs)")
     parser.add_argument("--out_dir", type=str, default="graph/graphs", help="输出图片目录（相对 CVaR_SAC）")
 
     parser.add_argument("--excessive_capacity_npz", type=str, default="wc_sac/dataset/excessive_capacity_cpu_300sec.npz")
@@ -177,7 +165,6 @@ def main(argv: Optional[list[str]] = None) -> None:
     if len(labels) != len(fpaths):
         raise ValueError(f"LABELS 长度必须与 FPATHS 相同：len(LABELS)={len(labels)}, len(FPATHS)={len(fpaths)}")
 
-    # Shared env config across all runs
     series = ExcessiveCapacitySeries.from_npz(args.excessive_capacity_npz)
     cfg = PricingEnvConfig(
         p_min=float(args.p_min),
@@ -190,16 +177,15 @@ def main(argv: Optional[list[str]] = None) -> None:
     f, g = make_poisson_rates(float(args.eta), float(args.thet), float(args.k), float(args.omega))
 
     traces: dict[str, np.ndarray] = {}
-    avg_preemption_rates: dict[str, float] = {}
-    over_threshold_ratios: dict[str, float] = {}
-    threshold = 0.05
+    avg_step_rewards: dict[str, float] = {}
+    positive_reward_ratios: dict[str, float] = {}
     for fpath, label in zip(fpaths, labels):
         _env_from_ckpt, get_action, sess = load_policy(
             fpath=fpath, itr=args.itr, deterministic=bool(args.deterministic)
         )
         env = PreemptivePricingEnv(series, cfg, f_arrival_rate=f, g_departure_rate=g)
         try:
-            trace = rollout_preemption_trace(
+            trace = rollout_reward_trace(
                 env=env,
                 get_action=get_action,
                 episodes=int(args.episodes),
@@ -207,17 +193,17 @@ def main(argv: Optional[list[str]] = None) -> None:
             )
             traces[str(label)] = trace
             if trace.size:
-                avg_preemption_rates[str(label)] = float(np.mean(trace))
-                over_threshold_ratios[str(label)] = float(np.mean(trace > threshold))
+                avg_step_rewards[str(label)] = float(np.mean(trace))
+                positive_reward_ratios[str(label)] = float(np.mean(trace > 0.0))
             else:
-                avg_preemption_rates[str(label)] = float("nan")
-                over_threshold_ratios[str(label)] = float("nan")
+                avg_step_rewards[str(label)] = float("nan")
+                positive_reward_ratios[str(label)] = float("nan")
         finally:
             sess.close()
 
     base_dir = Path(__file__).resolve().parent.parent
     out_dir = (base_dir / str(args.out_dir)).resolve()
-    out_png = save_multi_preemption_plot(
+    out_png = save_multi_reward_plot(
         traces=traces,
         dt_seconds=float(cfg.dt),
         num_bins=int(args.bins),
@@ -225,14 +211,13 @@ def main(argv: Optional[list[str]] = None) -> None:
         title=str(args.title),
         seed=int(args.seed),
     )
-    print(f"[summary] preemption_rate (threshold={threshold:.4f})")
+    print("[summary] reward_per_step")
     for label in traces.keys():
-        avg_rate = avg_preemption_rates.get(label, float("nan"))
-        over_ratio = over_threshold_ratios.get(label, float("nan"))
-        print(f"  {label}: avg={avg_rate:.6f}, over_threshold_ratio={over_ratio:.6f}")
+        avg_reward = avg_step_rewards.get(label, float("nan"))
+        pos_ratio = positive_reward_ratios.get(label, float("nan"))
+        print(f"  {label}: avg={avg_reward:.6f}, positive_ratio={pos_ratio:.6f}")
     print(f"[ok] saved figure: {out_png}")
 
 
 if __name__ == "__main__":
     main()
-

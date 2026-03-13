@@ -17,7 +17,7 @@ def normalize_to_0_100(x: np.ndarray) -> np.ndarray:
 # total capacityy = 387168.0
 # 1) 加载 npz（从 dataset 目录）
 base_dir = Path(__file__).resolve().parent.parent
-path = base_dir / "dataset" / "excessive_capacity_cpu.npz"
+path = base_dir / "dataset" / "simulate_workload_20260307_200316.npz"
 
 # 详细检查 npz 内容
 data = np.load(str(path), allow_pickle=True)
