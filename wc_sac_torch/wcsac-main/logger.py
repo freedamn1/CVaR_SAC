@@ -1,4 +1,3 @@
-from torch.utils.tensorboard import SummaryWriter
 from collections import defaultdict
 import os
 import csv
@@ -19,6 +18,7 @@ COMMON_EVAL_FORMAT = [
     ("step", "S", "int"),
     ("mean_reward", "R", "float"),
     ("mean_cost", "C", "float"),
+    ("mean_cost_rate", "CR", "float"),
     ("cost_limit_violations", "CVIO", "float"),
 ]
 
@@ -139,15 +139,26 @@ class Logger(object):
     def __init__(self, log_dir, save_tb=False, log_frequency=10000, agent="sac"):
         self._log_dir = log_dir
         self._log_frequency = log_frequency
-        tb_dir = os.path.join(log_dir, "data/tb")
+        tb_dir = os.path.join(log_dir, "tb")
+        os.makedirs(tb_dir, exist_ok=True)
         if save_tb:
-            if os.path.exists(tb_dir):
-                try:
-                    shutil.rmtree(tb_dir)
-                except Warning:
-                    print("logger.py warning: Unable to remove tb directory")
-                    pass
-            self._sw = SummaryWriter(tb_dir)
+            try:
+                from torch.utils.tensorboard import SummaryWriter
+            except Exception as e:
+                print(
+                    "TensorBoard 写日志依赖导入失败，将自动关闭 log_save_tb，仅保留 CSV 日志。错误信息："
+                    + str(e)
+                )
+                self._sw = None
+            else:
+                if os.path.exists(tb_dir):
+                    try:
+                        shutil.rmtree(tb_dir)
+                    except Warning:
+                        print("logger.py warning: Unable to remove tb directory")
+                        pass
+                os.makedirs(tb_dir, exist_ok=True)
+                self._sw = SummaryWriter(tb_dir)
         else:
             self._sw = None
         # each agent has specific output format for training

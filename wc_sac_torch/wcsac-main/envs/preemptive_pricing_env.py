@@ -1,6 +1,6 @@
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Union
 
 import gym
 import numpy as np
@@ -41,7 +41,7 @@ class ExcessiveCapacitySeries:
         self.excessive_capacity_cpu = normalize_to_0_100(self.excessive_capacity_cpu)
 
     @classmethod
-    def from_npz(cls, path: str | Path) -> "ExcessiveCapacitySeries":
+    def from_npz(cls, path: Union[str, Path]) -> "ExcessiveCapacitySeries":
         file_path = Path(path)
         if not file_path.exists():
             raise FileNotFoundError(f"NPZ file not found: {file_path}")

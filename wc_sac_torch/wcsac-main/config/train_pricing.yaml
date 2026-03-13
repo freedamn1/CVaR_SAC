@@ -1,9 +1,58 @@
-defaults:
-    - agent: wcsac_pricing
-    - _self_
-
 env: preemptive_pricing
 experiment: pricing_exp
+
+agent:
+  name: wcsac_pricing
+  agent:
+    _target_: agent.wcsac.WCSACAgent
+    obs_dim: ???
+    action_dim: ???
+    action_range: ???
+    device: ${device}
+    critic_cfg: ${agent.double_q_critic}
+    safety_critic_cfg: ${agent.safety_critic}
+    actor_cfg: ${agent.diag_gaussian_actor}
+    discount: 0.99
+    init_temperature: 0.6931
+    alpha_lr: 1e-3
+    alpha_betas: [0.9, 0.999]
+    actor_lr: 1e-3
+    actor_betas: [0.9, 0.999]
+    actor_update_frequency: 1
+    critic_lr: 1e-3
+    critic_betas: [0.9, 0.999]
+    critic_tau: 0.005
+    critic_target_update_frequency: 1
+    batch_size: 256
+    learnable_temperature: true
+    cost_limit: 0.05
+    max_episode_len: ${horizon}
+    risk_level: ${risk_level}
+    damp_scale: 10
+    lr_scale: 0.1
+    zeta: ${zeta}
+
+  double_q_critic:
+    _target_: agent.critic.DoubleQCritic
+    obs_dim: ${agent.agent.obs_dim}
+    action_dim: ${agent.agent.action_dim}
+    hidden_dim: 256
+    hidden_depth: 2
+
+  safety_critic:
+    _target_: agent.critic.SafetyCritic
+    obs_dim: ${agent.agent.obs_dim}
+    action_dim: ${agent.agent.action_dim}
+    hidden_dim: 256
+    hidden_depth: 2
+
+  diag_gaussian_actor:
+    _target_: agent.actor.DiagGaussianActor
+    obs_dim: ${agent.agent.obs_dim}
+    action_dim: ${agent.agent.action_dim}
+    hidden_depth: 2
+    hidden_dim: 256
+    log_std_bounds: [-20, 2]
 
 excessive_capacity_npz: ../../wc_sac/dataset/excessive_capacity_cpu_300sec_azure.npz
 p_min: 0.1
@@ -18,16 +67,20 @@ omega: 2.4
 price_level_min: 0.1
 price_level_max: 1.0
 price_level_step: 0.1
+reward_scale: 1e-3
+update_freq: 100
+update_after: 500
+zeta: 0.1
 
-num_train_steps: 300000
+num_train_steps: 3000000
 replay_buffer_capacity: 1000000
-num_seed_steps: 5000
+num_seed_steps: 500
 eval_frequency: 20000
 num_eval_episodes: 10
 
 device: cpu
 log_frequency: 10000
-log_save_tb: true
+log_save_tb: false
 
 seed: 1
 risk_level: 0.5

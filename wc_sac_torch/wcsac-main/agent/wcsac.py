@@ -41,6 +41,7 @@ class WCSACAgent(Agent):
         risk_level,
         damp_scale,
         lr_scale,
+        zeta,
     ):
         super().__init__()
 
@@ -65,6 +66,9 @@ class WCSACAgent(Agent):
         self.pdf_cdf = self.pdf_cdf.to(self.device)
         self.damp_scale = damp_scale
         self.cost_lr_scale = lr_scale
+        self.zeta = float(zeta)
+        if not (0.0 <= self.zeta < 1.0):
+            raise ValueError(f"zeta must be in [0, 1), got: {self.zeta}")
 
         # Reward critic
         self.critic = hydra.utils.instantiate(critic_cfg).to(self.device)
@@ -91,9 +95,13 @@ class WCSACAgent(Agent):
         self.target_entropy = -action_dim
 
         # Set target cost
-        self.target_cost = (
-            self.cost_limit * (1 - self.discount**self.max_episode_len) / (1 - self.discount) / self.max_episode_len
-        )
+        discount = float(self.discount)
+        max_episode_len = int(self.max_episode_len)
+        if abs(1.0 - discount) < 1e-8:
+            discount_sum = float(max_episode_len)
+        else:
+            discount_sum = float((1.0 - discount**max_episode_len) / (1.0 - discount))
+        self.target_cost = float(self.cost_limit) * discount_sum
 
         # Optimizers
         self.actor_optimizer = torch.optim.Adam(self.actor.parameters(), lr=actor_lr, betas=actor_betas)
@@ -242,13 +250,22 @@ class WCSACAgent(Agent):
             logger.log("train/alpha_value", self.alpha, step)
             alpha_loss.backward()
             self.log_alpha_optimizer.step()
+            with torch.no_grad():
+                self.log_alpha.clamp_(min=float(np.log(1e-8)), max=float(np.log(1e8)))
 
             self.log_beta_optimizer.zero_grad()
-            beta_loss = torch.mean(self.beta * (self.target_cost - cvar).detach())
+            cvar_detached = cvar.detach()
+            upper = float(self.target_cost)
+            lower = float(self.target_cost) * (1.0 - float(self.zeta))
+            upper_vio = torch.relu(cvar_detached - upper)
+            lower_vio = torch.relu(lower - cvar_detached)
+            beta_loss = torch.mean(self.beta * (lower_vio - upper_vio))
             logger.log("train/beta_loss", beta_loss, step)
             logger.log("train/beta_value", self.beta, step)
             beta_loss.backward()
             self.log_beta_optimizer.step()
+            with torch.no_grad():
+                self.log_beta.clamp_(min=float(np.log(1e-8)), max=float(np.log(1e8)))
 
     def update(self, replay_buffer, logger, step):
         (
